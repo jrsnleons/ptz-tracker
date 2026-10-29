@@ -56,7 +56,34 @@ class NDIFinder:
             self.finder = None
 
 
+class LatestFrame:
+    """Hands the newest frame from a capture thread to the worker; older frames are dropped."""
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._frame = None
+        self._new = False
+        self.t = 0.0  # time.monotonic() the newest frame arrived
+
+    def put(self, frame):
+        with self._cond:
+            self._frame, self._new, self.t = frame, True, time.monotonic()
+            self._cond.notify()
+
+    def get(self, timeout=0.05):
+        """Waits up to `timeout` for a frame newer than the last one returned. Returns (frame, arrival time)."""
+        with self._cond:
+            if not self._new:
+                self._cond.wait(timeout)
+            if not self._new:
+                return None, 0.0
+            self._new = False
+            return self._frame, self.t
+
+
 class NDISource:
+    """NDI receive on its own thread, so detection always works on the newest frame."""
+
     kind = "NDI"
 
     def __init__(self, finder: NDIFinder, name, high_bandwidth=False):
@@ -75,8 +102,12 @@ class NDISource:
             raise RuntimeError(f"NDI source '{name}' not found")
         self.receiver.set_source(src)
         self._last_ts = None
+        self.latest = LatestFrame()
+        self._run = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
-    def read(self):
+    def _grab(self):
         if not self.receiver.is_connected():
             time.sleep(0.02)
             return None
@@ -87,7 +118,7 @@ class NDISource:
             return None
         ts = self.vf.get_timestamp_posix()
         if ts == self._last_ts:
-            time.sleep(0.004)  # no new frame yet
+            time.sleep(0.002)  # no new frame yet
             return None
         self._last_ts = ts
         arr = np.asarray(self.vf.get_array())
@@ -95,7 +126,23 @@ class NDISource:
         img = arr[: stride * yres].reshape(yres, stride // 4, 4)[:, :xres, :3]
         return np.ascontiguousarray(img)
 
+    def _loop(self):
+        while self._run:
+            try:
+                frame = self._grab()
+            except Exception:
+                time.sleep(0.1)
+                continue
+            if frame is not None:
+                self.latest.put(frame)
+
+    def read(self, timeout=0.05):
+        """Newest frame and when it arrived, or (None, 0) if nothing new came within `timeout`."""
+        return self.latest.get(timeout)
+
     def close(self):
+        self._run = False
+        self._thread.join(timeout=1)
         try:
             self.receiver.disconnect()
         except Exception:
@@ -117,9 +164,7 @@ class CVSource:
         if not self.cap.isOpened():
             raise RuntimeError(f"could not open video source: {target}")
         self.receiver = None
-        self._frame = None
-        self._new = False
-        self._lock = threading.Lock()
+        self.latest = LatestFrame()
         self._run = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -130,19 +175,10 @@ class CVSource:
             if not ok:
                 time.sleep(0.05)
                 continue
-            with self._lock:
-                self._frame = frame
-                self._new = True
+            self.latest.put(frame)
 
-    def read(self):
-        with self._lock:
-            if not self._new:
-                frame = None
-            else:
-                frame, self._new = self._frame, False
-        if frame is None:
-            time.sleep(0.004)
-        return frame
+    def read(self, timeout=0.05):
+        return self.latest.get(timeout)
 
     def close(self):
         self._run = False

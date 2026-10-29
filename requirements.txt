@@ -1,5 +1,5 @@
-numpy
-opencv-python
-onnxruntime
-PySide6
-cyndilib
+numpy==2.5.4
+opencv-python==5.0.0.93
+onnxruntime==1.31.0
+PySide6==6.12.0
+cyndilib==0.1.3

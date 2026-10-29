@@ -226,6 +226,7 @@ class NDIPTZ(PTZBase):
         self.src = ndi_source
         self._last = None
         self._last_zoom = None
+        self.lock = threading.RLock()  # the GUI (manual moves) and the worker (tracking) both send
 
     @property
     def ptz(self):
@@ -237,51 +238,59 @@ class NDIPTZ(PTZBase):
         return r is not None and r.is_connected() and r.is_ptz_supported()
 
     def pan_tilt(self, pan, tilt):
-        key = (round(pan, 3), round(tilt, 3))
-        if key == self._last or not self._ok():
-            return
-        self._last = key
-        # NDI: pan +1 = left, tilt +1 = up
-        self.ptz.pan_and_tilt(-pan, tilt)
+        with self.lock:
+            key = (round(pan, 3), round(tilt, 3))
+            if key == self._last or not self._ok():
+                return
+            self._last = key
+            # NDI: pan +1 = left, tilt +1 = up
+            self.ptz.pan_and_tilt(-pan, tilt)
 
     def zoom(self, speed):
-        key = round(speed, 3)
-        if key == self._last_zoom or not self._ok():
-            return
-        self._last_zoom = key
-        self.ptz.zoom(speed)
+        with self.lock:
+            key = round(speed, 3)
+            if key == self._last_zoom or not self._ok():
+                return
+            self._last_zoom = key
+            self.ptz.zoom(speed)
 
     def focus(self, speed):
-        if self._ok():
-            self.ptz.focus(speed)
+        with self.lock:
+            if self._ok():
+                self.ptz.focus(speed)
 
     def autofocus(self, on=True):
-        if self._ok() and on:
-            self.ptz.autofocus()
+        with self.lock:
+            if self._ok() and on:
+                self.ptz.autofocus()
 
     def one_push_af(self):
         self.autofocus(True)
 
     def home(self):
-        if self._ok():
-            self._last = None
-            self.ptz.set_pan_and_tilt_values(0.0, 0.0)
+        with self.lock:
+            if self._ok():
+                self._last = None
+                self.ptz.set_pan_and_tilt_values(0.0, 0.0)
 
     def recall_preset(self, n, speed=1.0):
-        if self._ok():
-            self._last = None
-            self._last_zoom = None
-            self.ptz.recall_preset(n, speed)
+        with self.lock:
+            if self._ok():
+                self._last = None
+                self._last_zoom = None
+                self.ptz.recall_preset(n, speed)
 
     def store_preset(self, n):
-        if self._ok():
-            self.ptz.store_preset(n)
+        with self.lock:
+            if self._ok():
+                self.ptz.store_preset(n)
 
     def stop(self):
-        self._last = None
-        self._last_zoom = None
-        self.pan_tilt(0, 0)
-        self.zoom(0)
+        with self.lock:
+            self._last = None
+            self._last_zoom = None
+            self.pan_tilt(0, 0)
+            self.zoom(0)
 
     def status(self):
         r = self.src.receiver

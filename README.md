@@ -35,6 +35,8 @@ On the way back the app recalls the preset and checks the position readout to co
 
 ### Tests
 - `.venv/bin/python -m tests.test_homing` runs a simulated camera, no hardware needed.
+- `.venv/bin/python -m tests.test_worker` checks the worker with fake video: stall stop, homing without video, GUI frame dropping.
+- Every second the app writes fps and timings to `~/Library/Logs/PTZ Tracker/perf.log` (also shown in the video HUD).
 - `.venv/bin/python -m tests.camera_stage_test` uses the real camera on the church network. It moves the camera and stores preset 10, then puts the camera back where it started.
 
 ### Tuning

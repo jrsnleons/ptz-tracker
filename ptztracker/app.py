@@ -38,6 +38,8 @@ from .tracking import CamController, TargetTracker, TrackSettings
 
 CONFIG_DIR = os.path.expanduser("~/Library/Application Support/PTZ Tracker")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+PERF_LOG = os.path.expanduser("~/Library/Logs/PTZ Tracker/perf.log")
+STALL_STOP = 0.5  # no new video for this long while tracking -> stop the camera
 
 DEFAULT_CONFIG = {
     "video": "NDI",
@@ -114,6 +116,14 @@ class TrackerWorker(QThread):
         self._lock = threading.Lock()
         self._running = True
         self._was_sending = False
+        self._stalled = False
+        self.gui_busy = False  # set while the GUI still has a frame to paint; newer ones are dropped
+        self._perf = None
+        try:
+            os.makedirs(os.path.dirname(PERF_LOG), exist_ok=True)
+            self._perf = open(PERF_LOG, "a", buffering=1)
+        except OSError:
+            pass
 
     def set_io(self, source, ptz, poller=None):
         with self._lock:
@@ -187,8 +197,34 @@ class TrackerWorker(QThread):
             return False
         return True
 
+    def _idle(self, cam, src):
+        """No new frame: keep homing going, and stop the camera if the video has stalled."""
+        if self.homing is not None and self.homing.step():
+            self._homing_done(time.monotonic())
+        last = src.latest.t
+        if self._was_sending and not self.manual_active and not self._stalled and last and time.monotonic() - last > STALL_STOP:
+            self._stalled = True
+            self.controller.reset()
+            cam.stop()
+            self.stage_event.emit("Video stalled — camera stopped until frames come back")
+
+    def _log_perf(self, fps, det_ms, loop_ms, age_ms, dropped):
+        if self._perf is None:
+            return
+        try:
+            self._perf.write(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} fps={fps:.1f} detect_ms={det_ms:.1f} "
+                f"loop_ms={loop_ms:.1f} frame_age_ms={age_ms:.1f} gui_dropped={dropped} state={self.stage_state} "
+                f"tracking={int(self.tracking_enabled)}\n"
+            )
+        except (OSError, ValueError):
+            pass
+
     def run(self):
         fps_t, fps_n, fps = time.monotonic(), 0, 0.0
+        det_sum = loop_sum = age_sum = 0.0
+        dropped = 0
+        timing = (0.0, 0.0, 0.0)
         while self._running:
             with self._lock:
                 src, cam = self.source, self.ptz
@@ -200,16 +236,20 @@ class TrackerWorker(QThread):
                 time.sleep(0.05)
                 continue
             try:
-                frame = src.read()
+                frame, arrived = src.read()
             except Exception as e:  # source died
                 self.error.emit(f"video error: {e}")
                 time.sleep(0.5)
                 continue
             if frame is None:
+                self._idle(cam, src)
                 continue
+            self._stalled = False
             h, w = frame.shape[:2]
             now = time.monotonic()
+            t0 = time.perf_counter()
             all_dets = self.detector.detect(frame)
+            t_det = time.perf_counter() - t0
             centre_y = (all_dets[:, 1] + all_dets[:, 3]) / 2
             dets = all_dets[centre_y <= self.settings.ignore_below * h]
 
@@ -299,9 +339,19 @@ class TrackerWorker(QThread):
                 self._was_sending = False
 
             fps_n += 1
+            det_sum += t_det
+            loop_sum += time.perf_counter() - t0
+            age_sum += now - arrived
             now = time.monotonic()
             if now - fps_t >= 1.0:
-                fps, fps_n, fps_t = fps_n / (now - fps_t), 0, now
+                fps = fps_n / (now - fps_t)
+                timing = (det_sum / fps_n * 1000, loop_sum / fps_n * 1000, age_sum / fps_n * 1000)
+                self._log_perf(fps, *timing, dropped)
+                fps_n, fps_t, det_sum, loop_sum, age_sum, dropped = 0, now, 0.0, 0.0, 0.0, 0
+            if self.gui_busy:
+                dropped += 1  # the GUI hasn't painted the last frame yet; skip this one
+                continue
+            self.gui_busy = True
             self.frame_ready.emit(
                 {
                     "frame": frame,
@@ -311,6 +361,7 @@ class TrackerWorker(QThread):
                     "lost": self.tracker.is_lost,
                     "out": (pan, tilt, zoom),
                     "fps": fps,
+                    "timing": timing,
                     "pos": pos,
                     "bounds": bounds,
                     "off_stage": len(dets) - int(on_mask.sum()),
@@ -441,7 +492,8 @@ class VideoView(QWidget):
             p.drawLine(br.center(), QPointF(tx, ty))
 
         pan, tilt, zoom = d["out"]
-        hud = f"{d['fps']:.0f} fps   heads {len(d['dets'])} (+{d['ignored']} ignored)   pan {pan:+.2f}  tilt {tilt:+.2f}  zoom {zoom:+.2f}"
+        det_ms, loop_ms, age_ms = d.get("timing", (0, 0, 0))
+        hud = f"{d['fps']:.0f} fps  det {det_ms:.0f} ms  loop {loop_ms:.0f} ms  wait {age_ms:.0f} ms   heads {len(d['dets'])} (+{d['ignored']} ignored)   pan {pan:+.2f}  tilt {tilt:+.2f}  zoom {zoom:+.2f}"
         p.setFont(QFont("Menlo", 12))
         hud_rect = p.fontMetrics().boundingRect(hud).adjusted(-8, -5, 8, 5)
         hud_rect.moveTopLeft(QPointF(r.x() + 8, r.y() + 8).toPoint())
@@ -535,7 +587,7 @@ class MainWindow(QMainWindow):
 
         self.view = VideoView(self.settings)
         self.view.clicked.connect(self.worker.click)
-        self.worker.frame_ready.connect(self.view.show_data)
+        self.worker.frame_ready.connect(self._show_frame)
         self.worker.error.connect(self.statusBar().showMessage)
         self.worker.stage_event.connect(self.statusBar().showMessage)
         self.worker.tracking_stopped.connect(lambda: self.set_tracking(False))
@@ -570,6 +622,11 @@ class MainWindow(QMainWindow):
         self.worker.start()
         self.statusBar().showMessage(f"Detector running on {self.detector.provider}")
         QApplication.instance().installEventFilter(self)
+
+    def _show_frame(self, data):
+        self.view.show_data(data)
+        self.view.repaint()
+        self.worker.gui_busy = False
 
     # ---------------- connection
     def _connection_box(self):
