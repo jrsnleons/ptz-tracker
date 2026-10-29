@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 from . import ptz as ptzmod
 from .detector import HeadDetector, default_model_path
 from .sources import HAVE_NDI, CVSource, NDIFinder, NDISource
-from .stage import CanonPositionPoller, Homing, StageBounds, StageSettings, pixel_to_angle
+from .stage import CanonPositionPoller, Homing, StageBounds, StageSettings, angle_to_pixel, pixel_to_angle
 from .tracking import CamController, TargetTracker, TrackSettings
 
 CONFIG_DIR = os.path.expanduser("~/Library/Application Support/PTZ Tracker")
@@ -117,6 +117,9 @@ class TrackerWorker(QThread):
         self._running = True
         self._was_sending = False
         self._stalled = False
+        self._resuming = False  # the current "homing" is the trip to the resume shot
+        self._pick_pending = False  # pick a target as soon as that trip ends, even with Auto-pick off
+        self.show_bounds = False  # draw the stage outline even while the stage feature is off (editing)
         self.gui_busy = False  # set while the GUI still has a frame to paint; newer ones are dropped
         self._perf = None
         try:
@@ -154,6 +157,7 @@ class TrackerWorker(QThread):
         self.wait(2000)
 
     def go_home(self, cam, reason):
+        self._resuming = False
         self.tracker.release()
         self.controller.reset()
         self.homing = Homing(cam, self.poller, self.stage.home_preset, self.stage.home)
@@ -164,6 +168,13 @@ class TrackerWorker(QThread):
 
     def _homing_done(self, now):
         result, self.homing = self.homing.result, None
+        if self._resuming:
+            self._resuming = False
+            self.stage_state = "tracking"
+            self._last_ok = now
+            self._pick_pending = True
+            self.stage_event.emit("Someone is back on stage — tracking resumed")
+            return
         self.stage_state = "waiting"
         self._home_since = now
         how = "" if result == "preset" else f" ({result})"
@@ -254,9 +265,10 @@ class TrackerWorker(QThread):
             dets = all_dets[centre_y <= self.settings.ignore_below * h]
 
             # stage boundary: work out which heads are on stage, in camera angles
-            bounds = self.stage.get_bounds() if self.stage.enabled else None
-            pos = self.poller.at(now - self.stage.video_latency) if (bounds and self.poller) else None
-            stage_on = pos is not None
+            shown = self.stage.get_bounds()
+            bounds = shown if self.stage.enabled else None
+            pos = self.poller.at(now - self.stage.video_latency) if (shown and self.poller) else None
+            stage_on = pos is not None and bounds is not None
 
             def on_stage(b):
                 pt = pixel_to_angle((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, pos, w, h)
@@ -277,6 +289,7 @@ class TrackerWorker(QThread):
             if self.homing is not None and (cancel_home or self.manual_active):
                 self.homing.cancel()  # STOP pressed or the operator took over
                 self.homing = None
+                self._resuming = False
                 self.stage_state = "tracking"
             if self.homing is not None and self.homing.step():
                 self._homing_done(now)
@@ -300,15 +313,26 @@ class TrackerWorker(QThread):
                 box = None
                 settled = self.poller.settled() and now - self._home_since > 1.5
                 self._present = self._present + 1 if (settled and len(candidates)) else 0
-                if self._present >= 10 and self.tracker.select_largest(candidates):
-                    box = self.tracker.box
-                    self.stage_state = "tracking"
-                    self._last_ok = now
-                    waiting = False
-                    self.stage_event.emit("Someone is back on stage — tracking resumed")
-            elif not self.tracker.active and self.tracking_enabled and self.auto_pick:
+                if self._present >= 10 and len(candidates):
+                    if self.stage.resume_move and self.stage.resume_shot and self.poller:
+                        # first frame the resume shot (position + zoom) at the chosen speed, then follow
+                        self._resuming = True
+                        self.homing = Homing(
+                            cam, self.poller, 0, self.stage.resume_shot, drive_only=True, max_speed=self.stage.resume_speed
+                        )
+                        self.stage_state = "homing"
+                        self._present = 0
+                        self.stage_event.emit("Someone is back on stage — moving to the resume shot")
+                    elif self.tracker.select_largest(candidates):
+                        box = self.tracker.box
+                        self.stage_state = "tracking"
+                        self._last_ok = now
+                        waiting = False
+                        self.stage_event.emit("Someone is back on stage — tracking resumed")
+            elif not self.tracker.active and self.tracking_enabled and (self.auto_pick or self._pick_pending):
                 if self.tracker.select_largest(candidates):
                     box = self.tracker.box
+                    self._pick_pending = False
 
             pan = tilt = zoom = 0.0
             if self.tracking_enabled and not self.manual_active and stage_on and not waiting:
@@ -363,7 +387,7 @@ class TrackerWorker(QThread):
                     "fps": fps,
                     "timing": timing,
                     "pos": pos,
-                    "bounds": bounds,
+                    "bounds": shown if (self.stage.enabled or self.show_bounds) else None,
                     "off_stage": len(dets) - int(on_mask.sum()),
                     "stage_state": self.stage_state if (self.homing is not None or (stage_on and self.tracking_enabled)) else None,
                 }
@@ -379,6 +403,8 @@ class VideoView(QWidget):
     drag_move = Signal(float, float)  # joystick drag on the video: pan, tilt in -1..1
     drag_end = Signal()
     wheel_zoom = Signal(int)  # +1 zoom in, -1 zoom out, 0 stop
+    bounds_edited = Signal(dict)  # stage bounds changed by dragging their edges (live)
+    bounds_edit_done = Signal()
 
     def __init__(self, settings: TrackSettings):
         super().__init__()
@@ -387,6 +413,9 @@ class VideoView(QWidget):
         self.image = None
         self.draw_mode = False
         self._drag = None  # (start, current) in frame coordinates
+        self.edit_mode = False  # drag the stage edges (or the whole box) instead of picking heads
+        self._edit = None  # (grab, start bounds, start angle) while an edge is being dragged
+        self.setMouseTracking(True)
         self._press = None  # widget position of a press that may become a camera drag
         self._joy = False  # True once the press has turned into a camera drag
         self._wheel_timer = QTimer(self, singleShot=True, interval=250, timeout=lambda: self.wheel_zoom.emit(0))
@@ -415,12 +444,87 @@ class VideoView(QWidget):
         y = (e.position().y() - r.y()) / r.height() * self.image.height()
         return min(max(x, 0), self.image.width()), min(max(y, 0), self.image.height())
 
+    def _stage_geometry(self):
+        d = self.data or {}
+        pos, bounds = d.get("pos"), d.get("bounds")
+        return (pos, bounds) if (pos is not None and bounds is not None) else (None, None)
+
+    def _hit(self, e):
+        """Which part of the stage box is under the mouse: a set of 'l','r','t','b' edges, 'move', or None."""
+        pos, b = self._stage_geometry()
+        if pos is None or self.image is None:
+            return None
+        iw, ih = self.image.width(), self.image.height()
+        r = self._rect()
+        tol = 12 * iw / r.width()  # 12 screen pixels, in frame pixels
+        x, y = self._to_frame(e)
+        mid_p, mid_t = (b.pan_min + b.pan_max) / 2, (b.tilt_min + b.tilt_max) / 2
+        left = angle_to_pixel(b.pan_min, mid_t, pos, iw, ih)
+        right = angle_to_pixel(b.pan_max, mid_t, pos, iw, ih)
+        top = angle_to_pixel(mid_p, b.tilt_max, pos, iw, ih)
+        bottom = angle_to_pixel(mid_p, b.tilt_min, pos, iw, ih)
+        if None in (left, right, top, bottom):
+            return None
+        edges = set()
+        within_y = top[1] - tol <= y <= bottom[1] + tol
+        within_x = left[0] - tol <= x <= right[0] + tol
+        if within_y and abs(x - left[0]) <= tol:
+            edges.add("l")
+        if within_y and abs(x - right[0]) <= tol:
+            edges.add("r")
+        if within_x and abs(y - top[1]) <= tol:
+            edges.add("t")
+        if within_x and abs(y - bottom[1]) <= tol:
+            edges.add("b")
+        if edges:
+            return edges
+        if left[0] < x < right[0] and top[1] < y < bottom[1]:
+            return "move"
+        return None
+
+    def _edit_cursor(self, grab):
+        if grab == "move":
+            return Qt.SizeAllCursor
+        if not grab:
+            return Qt.CrossCursor
+        if len(grab) == 2:
+            return Qt.SizeFDiagCursor if grab in ({"l", "t"}, {"r", "b"}) else Qt.SizeBDiagCursor
+        return Qt.SizeHorCursor if grab & {"l", "r"} else Qt.SizeVerCursor
+
+    def _edit_drag(self, e):
+        pos, _ = self._stage_geometry()
+        if pos is None:
+            return
+        grab, start, (sp, st) = self._edit
+        iw, ih = self.image.width(), self.image.height()
+        pan, tilt = pixel_to_angle(*self._to_frame(e), pos, iw, ih)
+        new = dict(start)
+        gap = 1.0  # keep the box at least this many degrees across
+        if grab == "move":
+            dp, dt = pan - sp, tilt - st
+            new = {"pan_min": start["pan_min"] + dp, "pan_max": start["pan_max"] + dp,
+                   "tilt_min": start["tilt_min"] + dt, "tilt_max": start["tilt_max"] + dt}  # fmt: skip
+        else:
+            if "l" in grab:
+                new["pan_min"] = min(pan, start["pan_max"] - gap)
+            if "r" in grab:
+                new["pan_max"] = max(pan, start["pan_min"] + gap)
+            if "t" in grab:
+                new["tilt_max"] = max(tilt, start["tilt_min"] + gap)
+            if "b" in grab:
+                new["tilt_min"] = min(tilt, start["tilt_max"] - gap)
+        self.bounds_edited.emit(new)
+
     def mousePressEvent(self, e):
         if self.image is None:
             return
         pt = self._to_frame(e)
         if self.draw_mode:
             self._drag = (pt, pt)
+        elif self.edit_mode and self._hit(e):
+            pos, b = self._stage_geometry()
+            iw, ih = self.image.width(), self.image.height()
+            self._edit = (self._hit(e), asdict(b), pixel_to_angle(*pt, pos, iw, ih))
         else:
             self._press, self._joy = e.position(), False
 
@@ -434,6 +538,10 @@ class VideoView(QWidget):
         if self._drag is not None:
             self._drag = (self._drag[0], self._to_frame(e))
             self.update()
+        elif self._edit is not None:
+            self._edit_drag(e)
+        elif self.edit_mode:
+            self.setCursor(self._edit_cursor(self._hit(e)))
         elif self._press is not None:
             d = e.position() - self._press
             if not self._joy and abs(d.x()) + abs(d.y()) > 8:
@@ -449,6 +557,10 @@ class VideoView(QWidget):
             self._wheel_timer.start()
 
     def mouseReleaseEvent(self, e):
+        if self._edit is not None:
+            self._edit = None
+            self.bounds_edit_done.emit()
+            return
         if self._press is not None:
             joy, self._press, self._joy = self._joy, None, False
             self.setCursor(Qt.CrossCursor)
@@ -497,8 +609,20 @@ class VideoView(QWidget):
         if pos is not None and bounds is not None:
             pts = [QPointF(r.x() + x * sx, r.y() + y * sy) for x, y in bounds.outline(pos, iw, ih)]
             if pts:
-                p.setPen(QPen(QColor(255, 200, 0, 220), 2, Qt.DashLine))
+                p.setPen(QPen(QColor(255, 200, 0, 220), 2, Qt.SolidLine if self.edit_mode else Qt.DashLine))
                 p.drawPolygon(QPolygonF(pts))
+            if self.edit_mode:
+                mp, mt = (bounds.pan_min + bounds.pan_max) / 2, (bounds.tilt_min + bounds.tilt_max) / 2
+                handles = [(bounds.pan_min, bounds.tilt_max), (mp, bounds.tilt_max), (bounds.pan_max, bounds.tilt_max),
+                           (bounds.pan_min, mt), (bounds.pan_max, mt),
+                           (bounds.pan_min, bounds.tilt_min), (mp, bounds.tilt_min), (bounds.pan_max, bounds.tilt_min)]  # fmt: skip
+                p.setBrush(QColor(255, 200, 0))
+                p.setPen(QPen(QColor(0, 0, 0), 1))
+                for hp, ht in handles:
+                    pt = angle_to_pixel(hp, ht, pos, iw, ih)
+                    if pt is not None:
+                        p.drawRect(QRectF(r.x() + pt[0] * sx - 5, r.y() + pt[1] * sy - 5, 10, 10))
+                p.setBrush(Qt.NoBrush)
 
         for det in d["dets"]:
             off = False
@@ -538,6 +662,8 @@ class VideoView(QWidget):
         banner = None
         if self.draw_mode:
             banner = ("Drag a box around the stage", QColor(40, 110, 200, 220))
+        elif self.edit_mode:
+            banner = ("Editing stage — drag an edge or corner, or the middle to move it", QColor(40, 110, 200, 220))
         elif state == "homing":
             banner = ("Going back to the stage shot…", QColor(200, 120, 0, 220))
         elif state == "waiting":
@@ -628,6 +754,8 @@ class MainWindow(QMainWindow):
         self.worker.stage_event.connect(self.statusBar().showMessage)
         self.worker.tracking_stopped.connect(lambda: self.set_tracking(False))
         self.view.rect_drawn.connect(self.stage_drawn)
+        self.view.bounds_edited.connect(self._bounds_edited)
+        self.view.bounds_edit_done.connect(self._bounds_edit_done)
 
         panel = QWidget()
         pl = QVBoxLayout(panel)
@@ -818,7 +946,13 @@ class MainWindow(QMainWindow):
         home = QPushButton("Go to stage shot")
         home.setFocusPolicy(Qt.NoFocus)
         home.clicked.connect(self.go_stage_home)
+        self.edit_btn = QPushButton("Edit stage")
+        self.edit_btn.setCheckable(True)
+        self.edit_btn.setToolTip("Drag the stage edges or corners (or the middle to move the whole box) instead of redrawing it")
+        self.edit_btn.setFocusPolicy(Qt.NoFocus)
+        self.edit_btn.toggled.connect(self.set_edit_stage)
         row.addWidget(draw)
+        row.addWidget(self.edit_btn)
         row.addWidget(home)
         v.addLayout(row)
 
@@ -827,7 +961,20 @@ class MainWindow(QMainWindow):
         self.resume_check.toggled.connect(lambda on: setattr(self.stage, "auto_resume", on))
         v.addWidget(self.resume_check)
 
+        self.resume_move_check = QCheckBox("When they return, first move to a set position and zoom")
+        self.resume_move_check.setChecked(self.stage.resume_move)
+        self.resume_move_check.toggled.connect(self._resume_move_toggled)
+        v.addWidget(self.resume_move_check)
+        row2 = QHBoxLayout()
+        set_resume = QPushButton("Set resume shot from current view")
+        set_resume.setToolTip("Frame the position and zoom you want when someone comes back, then press this")
+        set_resume.setFocusPolicy(Qt.NoFocus)
+        set_resume.clicked.connect(self.set_resume_shot)
+        row2.addWidget(set_resume)
+        v.addLayout(row2)
+
         f = QFormLayout()
+        f.addRow("Resume move speed", slider(0.1, 1.0, self.stage.resume_speed, lambda x: setattr(self.stage, "resume_speed", x)))
         spin = QSpinBox()
         spin.setRange(1, 99)
         spin.setValue(self.stage.home_preset)
@@ -852,7 +999,7 @@ class MainWindow(QMainWindow):
             return
         self.set_tracking(False)
         self.view.draw_mode = True
-        self.view.setCursor(Qt.SizeFDiagCursor)
+        self.view.setCursor(Qt.CrossCursor)
         self.statusBar().showMessage("Zoom out to the wide stage shot, then drag a box around the stage")
 
     def stage_drawn(self, x1, y1, x2, y2):
@@ -871,6 +1018,48 @@ class MainWindow(QMainWindow):
         self._save()
         self._refresh_status()
         self.statusBar().showMessage(f"Stage saved, and this shot is stored as preset {self.stage.home_preset}")
+
+    def set_edit_stage(self, on):
+        if on and not self.stage.bounds:
+            self.edit_btn.setChecked(False)
+            QMessageBox.information(self, "Edit stage", "Draw the stage once first, then you can adjust its edges here.")
+            return
+        if on and (self.poller is None or self.poller.latest() is None):
+            self.edit_btn.setChecked(False)
+            QMessageBox.information(self, "Edit stage", "Connect to the camera first (the stage edges need its position).")
+            return
+        self.set_tracking(False) if on else None
+        self.view.edit_mode = on
+        self.worker.show_bounds = on
+        self.view.setCursor(Qt.CrossCursor)
+        self.view.update()
+        self.statusBar().showMessage("Drag the yellow edges to adjust the stage" if on else "Stage edit finished")
+
+    def _bounds_edited(self, new):
+        self.stage.bounds = new
+
+    def _bounds_edit_done(self):
+        self._save()
+        self.statusBar().showMessage("Stage updated")
+
+    def _resume_move_toggled(self, on):
+        if on and not self.stage.resume_shot:
+            self.resume_move_check.setChecked(False)
+            QMessageBox.information(
+                self, "Resume shot", "Frame the position and zoom you want first, then press 'Set resume shot from current view'."
+            )
+            return
+        self.stage.resume_move = on
+
+    def set_resume_shot(self):
+        pos = self.poller.latest() if self.poller else None
+        if pos is None:
+            QMessageBox.information(self, "Resume shot", "Connect to the camera first (it needs the camera position).")
+            return
+        self.stage.resume_shot = {"pan": pos.pan, "tilt": pos.tilt, "hfov": pos.hfov}
+        self.resume_move_check.setChecked(True)
+        self._save()
+        self.statusBar().showMessage(f"Resume shot saved: pan {pos.pan:+.1f}°  tilt {pos.tilt:+.1f}°  view {pos.hfov:.1f}°")
 
     def go_stage_home(self):
         self.set_tracking(False)

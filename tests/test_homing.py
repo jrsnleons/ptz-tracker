@@ -186,6 +186,21 @@ def main():
     failures += not ok
     print(f"{'PASS' if ok else 'FAIL'}  stage point stays on stage after pan+zoom ({moved[0]:.0f},{moved[1]:.0f} px)")
 
+    # the trip to the resume shot, at a capped speed
+    RESUME = {"pan": -6.0, "tilt": 1.0, "hfov": 30.0}
+    for cap in (0.15, 0.5):
+        cam = SimCamera("obey", pan=4.99, tilt=-4.06, hfov=44.8)
+        h = Homing(cam, SimPoller(cam), 0, RESUME, drive_only=True, max_speed=cap)
+        t0, peak = time.monotonic(), 0.0
+        while not h.step() and time.monotonic() - t0 < 25:
+            peak = max(peak, abs(cam.speed[0]), abs(cam.speed[1]))
+            time.sleep(0.03)
+        took = time.monotonic() - t0
+        ok = h.result == "driven there" and peak <= cap + 1e-9 and abs(cam.pos[0] - RESUME["pan"]) < 0.4
+        failures += not ok
+        print(f"{'PASS' if ok else 'FAIL'}  resume move at speed cap {cap:.2f} -> {h.result!r} in {took:.1f}s, peak speed {peak:.2f}")
+    cam.close()
+
     print("all passed" if failures == 0 else f"{failures} FAILED")
     return failures
 

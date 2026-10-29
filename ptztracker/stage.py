@@ -157,6 +157,9 @@ class StageSettings:
     video_latency: float = 0.3  # video arrives this much later than the position readback
     margin: float = 0.5  # degrees of slack around the boundary
     home: dict = None  # {"pan", "tilt", "hfov"} of the stage shot, to check the camera really got there
+    resume_move: bool = False  # when someone comes back, first move to resume_shot (position + zoom) before following
+    resume_shot: dict = None  # {"pan", "tilt", "hfov"} to frame before following resumes
+    resume_speed: float = 0.4  # fastest the camera moves on that trip, 0..1 of its top speed
 
     def get_bounds(self):
         return StageBounds(**self.bounds) if self.bounds else None
@@ -174,10 +177,11 @@ class Homing:
     SETTLE = 0.25
     PAN_TOL, TILT_TOL, FOV_TOL = 0.4, 0.4, 1.0
 
-    def __init__(self, cam, poller, preset, home):
+    def __init__(self, cam, poller, preset, home, drive_only=False, max_speed=0.5):
         self.cam, self.poller, self.preset = cam, poller, preset
         self.home = home  # dict or None (stage drawn before home angles were recorded)
-        self.phase = "stopping"
+        self.max_speed = max_speed
+        self.phase = "drive" if drive_only else "stopping"
         self.t = time.monotonic()
         self.tries = 0
         self.result = None  # set when done: "preset", "preset, 2nd try", "driven there", "gave up"
@@ -242,18 +246,21 @@ class Homing:
                 self.phase, self.result = "done", "gave up"
                 return True
             h = self.home
-            self.cam.pan_tilt(_drive(h["pan"] - pos.pan, self.PAN_TOL * 0.5), _drive(h["tilt"] - pos.tilt, self.TILT_TOL * 0.5))
+            self.cam.pan_tilt(
+                _drive(h["pan"] - pos.pan, self.PAN_TOL * 0.5, self.max_speed),
+                _drive(h["tilt"] - pos.tilt, self.TILT_TOL * 0.5, self.max_speed),
+            )
             ez = h["hfov"] - pos.hfov  # + = need a wider view
             if abs(ez) < self.FOV_TOL * 0.5:
                 self.cam.zoom(0)
             else:
-                self.cam.zoom((-1 if ez > 0 else 1) * (0.4 if abs(ez) > 3 else 0.15))
+                self.cam.zoom((-1 if ez > 0 else 1) * min(self.max_speed, 0.4 if abs(ez) > 3 else 0.15))
             return False
         return True
 
 
-def _drive(err, tol):
+def _drive(err, tol, max_speed=0.5):
     """Speed toward a target angle: proportional, with a floor so it doesn't creep forever."""
     if abs(err) < tol:
         return 0.0
-    return math.copysign(min(0.5, max(0.05, abs(err) * 0.06)), err)
+    return math.copysign(min(max_speed, max(0.05, abs(err) * 0.06)), err)

@@ -40,6 +40,11 @@ On the way back the app recalls the preset and checks the position readout to co
 - Every second the app writes fps and timings to `~/Library/Logs/PTZ Tracker/perf.log` (also shown in the video HUD).
 - `.venv/bin/python -m tests.camera_stage_test` uses the real camera on the church network. It moves the camera and stores preset 10, then puts the camera back where it started.
 
+### Editing the stage and the return trip
+- **Edit stage** shows handles on the stage box. Drag an edge or corner to adjust it, or drag the middle to move the whole box. No need to redraw.
+- **Resume shot**: frame the position and zoom you want when someone comes back, press *Set resume shot from current view*, and tick *When they return, first move to a set position and zoom*. *Resume move speed* caps how fast the camera travels there. Leave the tick off to just keep following from the stage shot.
+- *Resume tracking when someone is back on stage* turns the follow-again behaviour on or off.
+
 ### Tuning
 - **Speed / Max speed**: how hard the camera chases, and the cap on that.
 - **Deadzone**: the dashed box. The camera only moves once the head leaves it, which keeps it from hunting.
