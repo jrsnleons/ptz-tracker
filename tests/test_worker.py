@@ -103,6 +103,22 @@ def main():
     print(("PASS" if homed else "FAIL") + f"  homing completes with no video (recalls {cam.recalls}, state {w.stage_state})")
     ok &= homed
 
+    # resume zoom: ease toward the set zoom level, capped at the resume speed, then stop
+    class P:
+        hfov = 45.0
+
+        def latest(self, max_age=1.0):
+            return self
+
+    w.poller, w.manual_active = P(), False
+    w.stage.resume_speed, w._resume_fov = 0.3, 30.0
+    z_in = w._resume_zoom()
+    w.poller.hfov = 30.4
+    z_done = w._resume_zoom()
+    zoom_ok = z_in == 0.3 and z_done is None and w._resume_fov is None
+    print(("PASS" if zoom_ok else "FAIL") + f"  resume zoom eases in at the capped speed ({z_in}) and stops when there ({z_done})")
+    ok &= zoom_ok
+
     w.stop()
     print("all passed" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

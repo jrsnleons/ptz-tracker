@@ -117,8 +117,7 @@ class TrackerWorker(QThread):
         self._running = True
         self._was_sending = False
         self._stalled = False
-        self._resuming = False  # the current "homing" is the trip to the resume shot
-        self._pick_pending = False  # pick a target as soon as that trip ends, even with Auto-pick off
+        self._resume_fov = None  # horizontal field of view to ease to (degrees) while tracking resumes
         self.show_bounds = False  # draw the stage outline even while the stage feature is off (editing)
         self.gui_busy = False  # set while the GUI still has a frame to paint; newer ones are dropped
         self._perf = None
@@ -157,7 +156,7 @@ class TrackerWorker(QThread):
         self.wait(2000)
 
     def go_home(self, cam, reason):
-        self._resuming = False
+        self._resume_fov = None
         self.tracker.release()
         self.controller.reset()
         slow = self.stage.home_speed < 0.99 and self.stage.home is not None and self.poller is not None
@@ -171,13 +170,6 @@ class TrackerWorker(QThread):
 
     def _homing_done(self, now):
         result, self.homing = self.homing.result, None
-        if self._resuming:
-            self._resuming = False
-            self.stage_state = "tracking"
-            self._last_ok = now
-            self._pick_pending = True
-            self.stage_event.emit("Someone is back on stage — tracking resumed")
-            return
         self.stage_state = "waiting"
         self._home_since = now
         how = "" if result == "preset" else f" ({result})"
@@ -210,6 +202,21 @@ class TrackerWorker(QThread):
             self.go_home(cam, "Lost the speaker")
             return False
         return True
+
+    def _resume_zoom(self):
+        """Zoom speed toward the resume zoom level, or None once it is reached (or not in use)."""
+        if self._resume_fov is None:
+            return None
+        pos = self.poller.latest() if self.poller else None
+        if pos is None or self.manual_active:
+            self._resume_fov = None
+            return None
+        err = self._resume_fov - pos.hfov  # + = need a wider view
+        if abs(err) < 1.0:
+            self._resume_fov = None
+            self.ptz.zoom(0)
+            return None
+        return (-1 if err > 0 else 1) * min(self.stage.resume_speed, 0.4 if abs(err) > 3 else 0.15)
 
     def _idle(self, cam, src):
         """No new frame: keep homing going, and stop the camera if the video has stalled."""
@@ -292,7 +299,6 @@ class TrackerWorker(QThread):
             if self.homing is not None and (cancel_home or self.manual_active):
                 self.homing.cancel()  # STOP pressed or the operator took over
                 self.homing = None
-                self._resuming = False
                 self.stage_state = "tracking"
             if self.homing is not None and self.homing.step():
                 self._homing_done(now)
@@ -316,26 +322,17 @@ class TrackerWorker(QThread):
                 box = None
                 settled = self.poller.settled() and now - self._home_since > 1.5
                 self._present = self._present + 1 if (settled and len(candidates)) else 0
-                if self._present >= 10 and len(candidates):
+                if self._present >= 10 and self.tracker.select_largest(candidates):
+                    box = self.tracker.box
+                    self.stage_state = "tracking"
+                    self._last_ok = now
+                    waiting = False
                     if self.stage.resume_move and self.stage.resume_shot and self.poller:
-                        # first frame the resume shot (position + zoom) at the chosen speed, then follow
-                        self._resuming = True
-                        self.homing = Homing(
-                            cam, self.poller, 0, self.stage.resume_shot, drive_only=True, max_speed=self.stage.resume_speed
-                        )
-                        self.stage_state = "homing"
-                        self._present = 0
-                        self.stage_event.emit("Someone is back on stage — moving to the resume shot")
-                    elif self.tracker.select_largest(candidates):
-                        box = self.tracker.box
-                        self.stage_state = "tracking"
-                        self._last_ok = now
-                        waiting = False
-                        self.stage_event.emit("Someone is back on stage — tracking resumed")
-            elif not self.tracker.active and self.tracking_enabled and (self.auto_pick or self._pick_pending):
+                        self._resume_fov = self.stage.resume_shot["hfov"]  # tracking starts now; zoom eases to this
+                    self.stage_event.emit("Someone is back on stage — tracking resumed")
+            elif not self.tracker.active and self.tracking_enabled and self.auto_pick:
                 if self.tracker.select_largest(candidates):
                     box = self.tracker.box
-                    self._pick_pending = False
 
             pan = tilt = zoom = 0.0
             if self.tracking_enabled and not self.manual_active and stage_on and not waiting:
@@ -351,8 +348,13 @@ class TrackerWorker(QThread):
                         pan = 0.0
                     if (cur.tilt >= bounds.tilt_max and tilt > 0) or (cur.tilt <= bounds.tilt_min and tilt < 0):
                         tilt = 0.0
+                rz = self._resume_zoom()
+                if rz is not None:
+                    # easing to the resume zoom: keep following, but no faster than the resume speed
+                    cap = self.stage.resume_speed
+                    pan, tilt, zoom = float(np.clip(pan, -cap, cap)), float(np.clip(tilt, -cap, cap)), rz
                 cam.pan_tilt(pan, tilt)
-                if not self.settings.lock_zoom:
+                if rz is not None or not self.settings.lock_zoom:
                     cam.zoom(zoom)
                 self._was_sending = True
             elif waiting or self.homing is not None:
@@ -964,13 +966,13 @@ class MainWindow(QMainWindow):
         self.resume_check.toggled.connect(lambda on: setattr(self.stage, "auto_resume", on))
         v.addWidget(self.resume_check)
 
-        self.resume_move_check = QCheckBox("When they return, first move to a set position and zoom")
+        self.resume_move_check = QCheckBox("When they return, ease to a set zoom while tracking")
         self.resume_move_check.setChecked(self.stage.resume_move)
         self.resume_move_check.toggled.connect(self._resume_move_toggled)
         v.addWidget(self.resume_move_check)
         row2 = QHBoxLayout()
-        set_resume = QPushButton("Set resume shot from current view")
-        set_resume.setToolTip("Frame the position and zoom you want when someone comes back, then press this")
+        set_resume = QPushButton("Set resume zoom from current view")
+        set_resume.setToolTip("Zoom to the level you want when someone comes back, then press this. Only the zoom is used; the position follows the person")
         set_resume.setFocusPolicy(Qt.NoFocus)
         set_resume.clicked.connect(self.set_resume_shot)
         row2.addWidget(set_resume)
@@ -978,7 +980,7 @@ class MainWindow(QMainWindow):
 
         f = QFormLayout()
         f.addRow("Return to stage speed", slider(0.1, 1.0, self.stage.home_speed, lambda x: setattr(self.stage, "home_speed", x)))
-        f.addRow("Resume move speed", slider(0.1, 1.0, self.stage.resume_speed, lambda x: setattr(self.stage, "resume_speed", x)))
+        f.addRow("Resume zoom speed", slider(0.1, 1.0, self.stage.resume_speed, lambda x: setattr(self.stage, "resume_speed", x)))
         spin = QSpinBox()
         spin.setRange(1, 99)
         spin.setValue(self.stage.home_preset)
@@ -1050,7 +1052,7 @@ class MainWindow(QMainWindow):
         if on and not self.stage.resume_shot:
             self.resume_move_check.setChecked(False)
             QMessageBox.information(
-                self, "Resume shot", "Frame the position and zoom you want first, then press 'Set resume shot from current view'."
+                self, "Resume shot", "Zoom to the level you want first, then press 'Set resume zoom from current view'."
             )
             return
         self.stage.resume_move = on
@@ -1063,7 +1065,7 @@ class MainWindow(QMainWindow):
         self.stage.resume_shot = {"pan": pos.pan, "tilt": pos.tilt, "hfov": pos.hfov}
         self.resume_move_check.setChecked(True)
         self._save()
-        self.statusBar().showMessage(f"Resume shot saved: pan {pos.pan:+.1f}°  tilt {pos.tilt:+.1f}°  view {pos.hfov:.1f}°")
+        self.statusBar().showMessage(f"Resume zoom saved: view {pos.hfov:.1f}°")
 
     def go_stage_home(self):
         self.set_tracking(False)
