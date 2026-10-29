@@ -23,7 +23,7 @@ VISCA over IP must be turned on in the camera's web settings. If it doesn't resp
 - The **shaded bottom zone** (Ignore below) is for the audience. Heads in it are never picked.
 - Locks: *pan* / *tilt* / *zoom* (tilt and zoom are locked by default, like the Windows config).
 - Using any manual control pauses tracking output until you let go.
-- Keys: arrows/WASD pan-tilt · Q/E zoom · H home · Space start/stop tracking · Esc release target · 1-9 recall preset · Shift+1-9 store preset.
+- Keys: arrows/WASD pan-tilt · Q/E zoom · [ ] focus near/far · F focus once · H home · G go to stage shot · Space start/stop tracking · Esc release target · X stop camera · 1-9 recall preset · Shift+1-9 store preset · ⌘, settings.
 - Settings are saved to `~/Library/Application Support/PTZ Tracker/config.json`.
 
 ### Stage boundary (return to the stage shot)
