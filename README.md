@@ -2,6 +2,18 @@
 
 A Mac port of the Windows `tracker.exe`, with manual PTZ controls added. It uses the same head-detection model (`models/head_640_v8s.onnx`) and the same pipeline: NDI video → YOLOv8 head detection → follow one head → PID → camera speed commands. On Apple Silicon it runs on CoreML (~5 ms per frame).
 
+## Download
+
+Ready-built apps are on the [Releases](https://github.com/jrsnleons/ptz-tracker/releases) page:
+
+- **Mac** (Apple Silicon, macOS 13+): `PTZ-Tracker-mac.zip`. Unzip, drag *PTZ Tracker.app* to Applications, then right-click → Open the first time (it is ad-hoc signed, not notarized).
+- **Windows** (10/11 x64): `PTZ-Tracker-windows.zip`, built by GitHub Actions. Unzip and run `PTZ Tracker.exe`. Allow it through Windows Firewall so NDI discovery works.
+
+## Branches
+
+- `master`: the Mac app (tracker, manual controls, stage boundary, packaging, current UI).
+- `windows-port`: the Windows build (DirectML/CPU inference, per-OS paths, DirectShow webcams, PyInstaller spec, build script and the *Build Windows app* workflow).
+
 ## Run
 
 Double-click **`PTZ Tracker.command`** in Finder, or run `./run.sh`. The first run creates `.venv`, which needs `uv` (`brew install uv`).
