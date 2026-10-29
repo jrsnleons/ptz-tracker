@@ -376,6 +376,9 @@ class TrackerWorker(QThread):
 class VideoView(QWidget):
     clicked = Signal(float, float)  # frame coordinates
     rect_drawn = Signal(float, float, float, float)  # frame coordinates (stage drawing)
+    drag_move = Signal(float, float)  # joystick drag on the video: pan, tilt in -1..1
+    drag_end = Signal()
+    wheel_zoom = Signal(int)  # +1 zoom in, -1 zoom out, 0 stop
 
     def __init__(self, settings: TrackSettings):
         super().__init__()
@@ -384,6 +387,9 @@ class VideoView(QWidget):
         self.image = None
         self.draw_mode = False
         self._drag = None  # (start, current) in frame coordinates
+        self._press = None  # widget position of a press that may become a camera drag
+        self._joy = False  # True once the press has turned into a camera drag
+        self._wheel_timer = QTimer(self, singleShot=True, interval=250, timeout=lambda: self.wheel_zoom.emit(0))
         self.setMinimumSize(640, 360)
         self.setStyleSheet("background:#111")
         self.setCursor(Qt.CrossCursor)
@@ -416,14 +422,41 @@ class VideoView(QWidget):
         if self.draw_mode:
             self._drag = (pt, pt)
         else:
-            self.clicked.emit(*pt)
+            self._press, self._joy = e.position(), False
+
+    def _joystick(self, e):
+        """Drag toward where the camera should look; farther from the press point = faster."""
+        reach = max(self.width(), self.height()) * 0.2
+        d = e.position() - self._press
+        return float(np.clip(d.x() / reach, -1, 1)), float(np.clip(-d.y() / reach, -1, 1))
 
     def mouseMoveEvent(self, e):
         if self._drag is not None:
             self._drag = (self._drag[0], self._to_frame(e))
             self.update()
+        elif self._press is not None:
+            d = e.position() - self._press
+            if not self._joy and abs(d.x()) + abs(d.y()) > 8:
+                self._joy = True
+                self.setCursor(Qt.ClosedHandCursor)
+            if self._joy:
+                self.drag_move.emit(*self._joystick(e))
+
+    def wheelEvent(self, e):
+        step = e.angleDelta().y()
+        if step:
+            self.wheel_zoom.emit(1 if step > 0 else -1)
+            self._wheel_timer.start()
 
     def mouseReleaseEvent(self, e):
+        if self._press is not None:
+            joy, self._press, self._joy = self._joy, None, False
+            self.setCursor(Qt.CrossCursor)
+            if joy:
+                self.drag_end.emit()
+            else:
+                self.clicked.emit(*self._to_frame(e))
+            return
         if self._drag is None:
             return
         (x1, y1), (x2, y2) = self._drag[0], self._to_frame(e)
@@ -587,6 +620,9 @@ class MainWindow(QMainWindow):
 
         self.view = VideoView(self.settings)
         self.view.clicked.connect(self.worker.click)
+        self.view.drag_move.connect(lambda pan, tilt: self.manual_press("mouse", pan, tilt))
+        self.view.drag_end.connect(lambda: self.manual_release("mouse"))
+        self.view.wheel_zoom.connect(self._wheel_zoom)
         self.worker.frame_ready.connect(self._show_frame)
         self.worker.error.connect(self.statusBar().showMessage)
         self.worker.stage_event.connect(self.statusBar().showMessage)
@@ -966,6 +1002,12 @@ class MainWindow(QMainWindow):
         tilt = float(np.clip(sum(t for _, t in self.held.values()), -1, 1)) * sp
         self.worker.manual_active = bool(self.held) or self.zoom_held != 0
         self.cam.pan_tilt(pan, tilt)
+
+    def _wheel_zoom(self, direction):
+        if direction:
+            self.zoom_press(direction)
+        else:
+            self.zoom_release()
 
     def manual_press(self, key, pan, tilt):
         self.held[key] = (pan, tilt)

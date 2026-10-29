@@ -18,6 +18,7 @@ VISCA over IP must be turned on in the camera's web settings. If it doesn't resp
 
 ## Using it
 
+- **Drag on the video** to move the camera (drag toward where it should look; further = faster). **Scroll wheel** zooms. A plain click without dragging still picks a head.
 - **Click a head** in the video to follow that person, or turn on *Auto-pick* to follow the biggest head.
 - The **shaded bottom zone** (Ignore below) is for the audience. Heads in it are never picked.
 - Locks: *pan* / *tilt* / *zoom* (tilt and zoom are locked by default, like the Windows config).
