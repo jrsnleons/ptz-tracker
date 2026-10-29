@@ -1,5 +1,6 @@
 """YOLOv8 head detector (same ONNX model as the Windows tracker)."""
 import os
+import sys
 
 import cv2
 import numpy as np
@@ -65,5 +66,7 @@ class HeadDetector:
 
 
 def default_model_path():
+    if getattr(sys, "frozen", False):  # inside the .app the model sits in Contents/Resources
+        return os.path.join(os.path.dirname(sys.executable), "..", "Resources", "models", "head_640_v8s.onnx")
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, "..", "models", "head_640_v8s.onnx")

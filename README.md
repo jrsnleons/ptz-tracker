@@ -52,3 +52,7 @@ On the way back the app recalls the preset and checks the position readout to co
 - **Curve**: above 1 means gentle near the target and faster when far away.
 - **Frame X/Y**: where the head should sit in the shot (Y 0.33 = rule-of-thirds headroom).
 - **Head size**: target head height for auto-zoom (only when zoom is unlocked).
+
+## Building the Mac app
+
+`packaging/build_app.sh` builds `dist/PTZ Tracker.app` with PyInstaller (installs into `.venv`: `uv pip install --python .venv/bin/python pyinstaller`). It is ad-hoc signed, so the first launch needs right-click → Open. The app bundles the NDI library and the detection model; settings and the perf log stay in `~/Library`.
