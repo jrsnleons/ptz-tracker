@@ -160,7 +160,10 @@ class TrackerWorker(QThread):
         self._resuming = False
         self.tracker.release()
         self.controller.reset()
-        self.homing = Homing(cam, self.poller, self.stage.home_preset, self.stage.home)
+        slow = self.stage.home_speed < 0.99 and self.stage.home is not None and self.poller is not None
+        self.homing = Homing(
+            cam, self.poller, self.stage.home_preset, self.stage.home, drive_only=slow, max_speed=self.stage.home_speed
+        )
         self._home_reason = reason
         self.stage_state = "homing"
         self._present = 0
@@ -974,6 +977,7 @@ class MainWindow(QMainWindow):
         v.addLayout(row2)
 
         f = QFormLayout()
+        f.addRow("Return to stage speed", slider(0.1, 1.0, self.stage.home_speed, lambda x: setattr(self.stage, "home_speed", x)))
         f.addRow("Resume move speed", slider(0.1, 1.0, self.stage.resume_speed, lambda x: setattr(self.stage, "resume_speed", x)))
         spin = QSpinBox()
         spin.setRange(1, 99)

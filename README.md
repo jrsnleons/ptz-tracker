@@ -42,6 +42,7 @@ On the way back the app recalls the preset and checks the position readout to co
 
 ### Editing the stage and the return trip
 - **Edit stage** shows handles on the stage box. Drag an edge or corner to adjust it, or drag the middle to move the whole box. No need to redraw.
+- **Return to stage speed** (1.00 = the camera's own preset speed). Lower it and the app drives the camera back itself at that capped speed, using the saved stage shot angles.
 - **Resume shot**: frame the position and zoom you want when someone comes back, press *Set resume shot from current view*, and tick *When they return, first move to a set position and zoom*. *Resume move speed* caps how fast the camera travels there. Leave the tick off to just keep following from the stage shot.
 - *Resume tracking when someone is back on stage* turns the follow-again behaviour on or off.
 

@@ -159,6 +159,7 @@ class StageSettings:
     home: dict = None  # {"pan", "tilt", "hfov"} of the stage shot, to check the camera really got there
     resume_move: bool = False  # when someone comes back, first move to resume_shot (position + zoom) before following
     resume_shot: dict = None  # {"pan", "tilt", "hfov"} to frame before following resumes
+    home_speed: float = 1.0  # 1.0 = recall the preset at the camera's own speed; lower = drive back at this capped speed
     resume_speed: float = 0.4  # fastest the camera moves on that trip, 0..1 of its top speed
 
     def get_bounds(self):
@@ -241,7 +242,7 @@ class Homing:
                 self.cam.stop()
                 self.phase, self.result = "done", "driven there"
                 return True
-            if now - self.t > 20.0:
+            if now - self.t > min(60.0, 10.0 / max(self.max_speed, 0.2)):  # slower trips get longer
                 self.cam.stop()
                 self.phase, self.result = "done", "gave up"
                 return True
