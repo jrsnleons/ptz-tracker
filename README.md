@@ -2,6 +2,12 @@
 
 A Mac port of the Windows `tracker.exe`, with manual PTZ controls added. It uses the same head-detection model (`models/head_640_v8s.onnx`) and the same pipeline: NDI video → YOLOv8 head detection → follow one head → PID → camera speed commands. On Apple Silicon it runs on CoreML (~5 ms per frame).
 
+## Download
+
+Ready-built apps are on the [Releases](https://github.com/jrsnleons/ptz-tracker/releases) page. The Windows zip (`PTZ-Tracker-windows.zip`) is built by GitHub Actions whenever a `v*` tag is pushed on this branch. Unzip and run `PTZ Tracker.exe`.
+
+This is the `windows-port` branch. The Mac app and the newest UI live on `master`.
+
 ## Windows
 
 The same code runs on Windows 10/11 x64 (DirectML GPU inference, CPU fallback; webcams via DirectShow). Settings are in `%APPDATA%\PTZ Tracker\config.json`, logs in `%LOCALAPPDATA%\PTZ Tracker\Logs\perf.log`.
