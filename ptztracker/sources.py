@@ -6,6 +6,8 @@ import time
 import cv2
 import numpy as np
 
+from .platform_paths import webcam_backend
+
 # low-latency RTSP: drop the ffmpeg buffer so the tracker sees the newest frame
 os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
@@ -157,7 +159,7 @@ class CVSource:
     def __init__(self, target):
         self.name = str(target)
         if isinstance(target, int) or str(target).isdigit():
-            self.cap = cv2.VideoCapture(int(target), cv2.CAP_AVFOUNDATION)
+            self.cap = cv2.VideoCapture(int(target), webcam_backend())
         else:
             self.cap = cv2.VideoCapture(str(target), cv2.CAP_FFMPEG)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

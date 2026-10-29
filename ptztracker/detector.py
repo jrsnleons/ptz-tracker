@@ -6,12 +6,17 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from .platform_paths import bundled_models_dir, onnx_providers
+
 
 def _session(path):
     opts = ort.SessionOptions()
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    # CoreML uses the Apple GPU / Neural Engine; fall back to CPU if it fails to load.
-    for providers in (["CoreMLExecutionProvider", "CPUExecutionProvider"], ["CPUExecutionProvider"]):
+    if sys.platform.startswith("win"):  # DirectML wants these off
+        opts.enable_mem_pattern = False
+        opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    # CoreML (Mac) / DirectML (Windows); fall back to CPU if the GPU provider fails to load.
+    for providers in (onnx_providers(), ["CPUExecutionProvider"]):
         try:
             return ort.InferenceSession(path, sess_options=opts, providers=providers)
         except Exception:
@@ -66,7 +71,4 @@ class HeadDetector:
 
 
 def default_model_path():
-    if getattr(sys, "frozen", False):  # inside the .app the model sits in Contents/Resources
-        return os.path.join(os.path.dirname(sys.executable), "..", "Resources", "models", "head_640_v8s.onnx")
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(here, "..", "models", "head_640_v8s.onnx")
+    return os.path.join(bundled_models_dir(), "head_640_v8s.onnx")

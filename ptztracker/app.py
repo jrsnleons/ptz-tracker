@@ -30,15 +30,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import platform_paths
 from . import ptz as ptzmod
 from .detector import HeadDetector, default_model_path
 from .sources import HAVE_NDI, CVSource, NDIFinder, NDISource
 from .stage import CanonPositionPoller, Homing, StageBounds, StageSettings, angle_to_pixel, pixel_to_angle
 from .tracking import CamController, TargetTracker, TrackSettings
 
-CONFIG_DIR = os.path.expanduser("~/Library/Application Support/PTZ Tracker")
+CONFIG_DIR = platform_paths.config_dir()
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
-PERF_LOG = os.path.expanduser("~/Library/Logs/PTZ Tracker/perf.log")
+PERF_LOG = os.path.join(platform_paths.log_dir(), "perf.log")
 STALL_STOP = 0.5  # no new video for this long while tracking -> stop the camera
 
 DEFAULT_CONFIG = {

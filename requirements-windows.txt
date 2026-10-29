@@ -1,0 +1,6 @@
+numpy==2.5.4
+opencv-python==5.0.0.93
+PySide6==6.12.0
+cyndilib==0.1.3
+onnxruntime-directml==1.23.0
+pyinstaller==6.22.3
