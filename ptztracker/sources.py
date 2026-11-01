@@ -1,4 +1,6 @@
 """Video inputs: NDI (cyndilib, bundles the NDI runtime), RTSP and local webcams."""
+import json
+import logging
 import os
 import threading
 import time
@@ -6,12 +8,60 @@ import time
 import cv2
 import numpy as np
 
-from .platform_paths import webcam_backend
+from .platform_paths import IS_MAC, IS_WIN, config_dir, webcam_backends
+
+log = logging.getLogger(__name__)
 
 # low-latency RTSP: drop the ffmpeg buffer so the tracker sees the newest frame
 os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
 )
+
+
+
+def _ndi_extra_ips():
+    """Points NDI discovery straight at the camera IP from the saved settings, as well as mDNS.
+
+    Windows Firewall or a router that blocks multicast otherwise leaves the source list empty.
+    NDI reads this from ndi-config.v1.json in NDI_CONFIG_DIR, so the user's own NDI config is copied
+    and the IP added to it. Has to run before the NDI library loads.
+    """
+    if os.environ.get("NDI_CONFIG_DIR"):
+        return
+    try:
+        with open(os.path.join(config_dir(), "config.json")) as f:
+            ip = json.load(f).get("camera_ip", "").strip()
+    except (OSError, ValueError):
+        ip = ""
+    if not ip:
+        return
+    if IS_WIN:
+        own = os.path.join(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "NDI", "ndi-config.v1.json")
+    elif IS_MAC:
+        own = os.path.expanduser("~/.ndi/ndi-config.v1.json")
+    else:
+        own = os.path.expanduser("~/.ndi/ndi-config.v1.json")
+    try:
+        with open(own) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        cfg = {}
+    nets = cfg.setdefault("ndi", {}).setdefault("networks", {})
+    ips = [x.strip() for x in str(nets.get("ips", "")).split(",") if x.strip()]
+    if ip not in ips:
+        ips.append(ip)
+    nets["ips"] = ",".join(ips)
+    folder = os.path.join(config_dir(), "ndi")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "ndi-config.v1.json"), "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.environ["NDI_CONFIG_DIR"] = folder
+    except OSError:
+        log.exception("could not write the NDI config")
+
+
+_ndi_extra_ips()
 
 try:
     from cyndilib.finder import Finder
@@ -21,6 +71,7 @@ try:
 
     HAVE_NDI = True
 except Exception:  # pragma: no cover - NDI is optional
+    log.exception("NDI library failed to load")
     HAVE_NDI = False
 
 
@@ -44,10 +95,16 @@ class NDIFinder:
         if self.finder is None:
             return None
         deadline = time.monotonic() + timeout
+        want = name.strip().lower()
         while True:
             self.finder.update_sources()
-            if name in self.finder.get_source_names():
+            names = self.finder.get_source_names()
+            if name in names:
                 return self.finder.get_source(name)
+            # typed by hand: accept "LWNRA-PTZ_CAM" for "MACHINE (LWNRA-PTZ_CAM)" and different capitals
+            close = [n for n in names if want and want in n.lower()]
+            if len(close) == 1:
+                return self.finder.get_source(close[0])
             if time.monotonic() > deadline:
                 return None
             self.finder.wait_for_sources(0.5)
@@ -95,7 +152,7 @@ class NDISource:
         self.receiver = Receiver(
             color_format=RecvColorFormat.BGRX_BGRA,
             bandwidth=RecvBandwidth.highest if high_bandwidth else RecvBandwidth.lowest,
-            recv_name="PTZ Tracker Mac",
+            recv_name="PTZ Tracker",
         )
         self.vf = VideoFrameSync()
         self.receiver.frame_sync.set_video_frame(self.vf)
@@ -159,17 +216,34 @@ class CVSource:
     def __init__(self, target):
         self.name = str(target)
         if isinstance(target, int) or str(target).isdigit():
-            self.cap = cv2.VideoCapture(int(target), webcam_backend())
+            self.cap = self._open_webcam(int(target))
+            self.name = f"Webcam {target}"
         else:
             self.cap = cv2.VideoCapture(str(target), cv2.CAP_FFMPEG)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"could not open video source: {target}")
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if not self.cap.isOpened():
+                raise RuntimeError(f"could not open video source: {target}")
         self.receiver = None
         self.latest = LatestFrame()
         self._run = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
+    @staticmethod
+    def _open_webcam(index):
+        """Tries each capture backend until one gives a real frame (DirectShow, then Media Foundation on Windows)."""
+        for backend in webcam_backends():
+            cap = cv2.VideoCapture(index, backend)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                for _ in range(20):  # some cameras need a few reads before the first frame
+                    ok, frame = cap.read()
+                    if ok and frame is not None and frame.size:
+                        return cap
+                    time.sleep(0.05)
+            cap.release()
+            log.warning("webcam %d: no frames with backend %s", index, backend)
+        raise RuntimeError(f"Webcam {index} didn't send any video. Check it isn't in use by another app, or try another number.")
 
     def _loop(self):
         while self._run:

@@ -1,4 +1,5 @@
 """YOLOv8 head detector (same ONNX model as the Windows tracker)."""
+import logging
 import os
 import sys
 
@@ -8,24 +9,32 @@ import onnxruntime as ort
 
 from .platform_paths import bundled_models_dir, onnx_providers
 
+log = logging.getLogger(__name__)
 
-def _session(path):
+
+def _session(path, providers=None):
     opts = ort.SessionOptions()
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     if sys.platform.startswith("win"):  # DirectML wants these off
         opts.enable_mem_pattern = False
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    # CoreML (Mac) / DirectML (Windows); fall back to CPU if the GPU provider fails to load.
-    for providers in (onnx_providers(), ["CPUExecutionProvider"]):
+    # CoreML (Mac) / DirectML (Windows); fall back to CPU if the GPU provider fails to load or to run.
+    for providers in ([providers] if providers else [onnx_providers(), ["CPUExecutionProvider"]]):
         try:
-            return ort.InferenceSession(path, sess_options=opts, providers=providers)
+            sess = ort.InferenceSession(path, sess_options=opts, providers=providers)
+            inp = sess.get_inputs()[0]
+            # some GPUs/drivers create the session fine and then fail on the first run
+            sess.run(None, {inp.name: np.zeros((1, 3, int(inp.shape[2]), int(inp.shape[3])), np.float32)})
+            return sess
         except Exception:
+            log.exception("model load failed with %s", providers)
             continue
     raise RuntimeError(f"could not load model {path}")
 
 
 class HeadDetector:
     def __init__(self, model_path, conf=0.4, nms=0.45):
+        self.model_path = model_path
         self.session = _session(model_path)
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
@@ -37,6 +46,14 @@ class HeadDetector:
         self._canvas = np.full((self.in_h, self.in_w, 3), 114, dtype=np.uint8)
         self._tensor = np.empty((1, 3, self.in_h, self.in_w), dtype=np.float32)
         self._layout = None  # (w, h) the canvas was last letterboxed for
+
+    def use_cpu(self):
+        """Switches to CPU inference after the GPU provider failed mid-run. False if already on CPU."""
+        if self.provider == "CPUExecutionProvider":
+            return False
+        self.session = _session(self.model_path, ["CPUExecutionProvider"])
+        self.provider = self.session.get_providers()[0]
+        return True
 
     def detect(self, frame_bgr):
         """Returns an (N, 5) array of [x1, y1, x2, y2, score] in frame pixels."""

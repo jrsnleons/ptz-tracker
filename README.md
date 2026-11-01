@@ -4,14 +4,21 @@ A Mac port of the Windows `tracker.exe`, with manual PTZ controls added. It uses
 
 ## Download
 
-Ready-built apps are on the [Releases](https://github.com/jrsnleons/ptz-tracker/releases) page. The Windows zip (`PTZ-Tracker-windows.zip`) is built by GitHub Actions whenever a `v*` tag is pushed on this branch. Unzip and run `PTZ Tracker.exe`.
+Ready-built apps are on the [Releases](https://github.com/jrsnleons/ptz-tracker/releases) page:
 
-This is the `windows-port` branch. The Mac app and the newest UI live on `master`.
+- **Windows** (10/11 x64): `PTZ-Tracker-Setup.exe` installs it with a Start menu and desktop shortcut. Or download `PTZ-Tracker-windows.zip`, unzip anywhere and run `PTZ Tracker.exe` (no install needed). Allow it through Windows Firewall (Private networks) on first run so NDI discovery works.
+- **Mac** (Apple Silicon, macOS 13+): `PTZ-Tracker-mac.zip`. Unzip, drag *PTZ Tracker.app* to Applications, then right-click → Open the first time (it is ad-hoc signed, not notarized).
+
+## Branches
+
+- `master`: the Mac app (tracker, manual controls, stage boundary, packaging, current UI).
+- `windows-port`: the same app plus the Windows build (DirectML/CPU inference, per-OS paths, webcams via DirectShow/Media Foundation, PyInstaller spec, installer, and the *Build Windows app* workflow). The Windows release is built from here.
 
 ## Windows
 
-The same code runs on Windows 10/11 x64 (DirectML GPU inference, CPU fallback; webcams via DirectShow). Settings are in `%APPDATA%\PTZ Tracker\config.json`, logs in `%LOCALAPPDATA%\PTZ Tracker\Logs\perf.log`.
-Build the app on a Windows PC with Python 3.12: `powershell -ExecutionPolicy Bypass -File packaging\build_win.ps1` → `dist\PTZ Tracker\PTZ Tracker.exe` and `dist\PTZ-Tracker-windows.zip`. PyInstaller can't cross-compile, so on a Mac use the *Build Windows app* GitHub Actions workflow instead (Actions tab → Run workflow → download the artifact). Allow the app through Windows Firewall on first run so NDI discovery works.
+Settings are in `%APPDATA%\PTZ Tracker\config.json`, logs in `%LOCALAPPDATA%\PTZ Tracker\Logs\` (`perf.log`, and `app.log` for errors).
+If the NDI camera isn't listed, allow PTZ Tracker through Windows Firewall, or connect once with *Camera IP* filled in: from the next launch the app also asks the camera directly instead of relying only on network discovery.
+Build on a Windows PC with Python 3.12: `powershell -ExecutionPolicy Bypass -File packaging\build_win.ps1` → `dist\PTZ Tracker\PTZ Tracker.exe`, the zip, and the installer if Inno Setup is installed. PyInstaller can't cross-compile, so on a Mac push a `v*-windows` tag (or run the *Build Windows app* workflow): GitHub Actions builds, smoke-tests and publishes it.
 
 ## Run
 
@@ -34,7 +41,7 @@ VISCA over IP must be turned on in the camera's web settings. If it doesn't resp
 - The **shaded bottom zone** (Ignore below) is for the audience. Heads in it are never picked.
 - Locks: *pan* / *tilt* / *zoom* (tilt and zoom are locked by default, like the Windows config).
 - Using any manual control pauses tracking output until you let go.
-- Keys: arrows/WASD pan-tilt · Q/E zoom · H home · Space start/stop tracking · Esc release target · 1-9 recall preset · Shift+1-9 store preset.
+- Keys: arrows/WASD pan-tilt · Q/E zoom · [ ] focus near/far · F focus once · H home · G go to stage shot · Space start/stop tracking · Esc release target · X stop camera · 1-9 recall preset · Shift+1-9 store preset · ⌘, settings.
 - Settings are saved to `~/Library/Application Support/PTZ Tracker/config.json`.
 
 ### Stage boundary (return to the stage shot)
