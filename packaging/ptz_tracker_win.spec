@@ -7,7 +7,7 @@ from PyInstaller.utils.win32.versioninfo import (
 )
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
-VERSION = os.environ.get("PTZ_VERSION", "1.1.1")
+VERSION = os.environ.get("PTZ_VERSION", "1.1.2")
 nums = tuple(int(x) for x in (VERSION.split(".") + ["0"] * 4)[:4])
 
 version_info = VSVersionInfo(

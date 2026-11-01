@@ -16,7 +16,7 @@ jobs:
       - name: Version from tag
         shell: pwsh
         run: |
-          $v = "1.1.1"
+          $v = "1.1.2"
           if ("${{ github.ref }}" -match "refs/tags/v([0-9.]+)") { $v = $Matches[1] }
           "PTZ_VERSION=$v" >> $env:GITHUB_ENV
       - name: Install Inno Setup

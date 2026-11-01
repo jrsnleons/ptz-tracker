@@ -1,7 +1,7 @@
 ; Inno Setup script for the Windows installer. build_win.ps1 runs it after PyInstaller:
-;   iscc /DAppVersion=1.1.1 packaging\installer.iss  ->  dist\PTZ-Tracker-Setup.exe
+;   iscc /DAppVersion=1.1.2 packaging\installer.iss  ->  dist\PTZ-Tracker-Setup.exe
 #ifndef AppVersion
-  #define AppVersion "1.1.1"
+  #define AppVersion "1.1.2"
 #endif
 
 [Setup]

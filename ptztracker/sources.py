@@ -29,7 +29,7 @@ def _ndi_extra_ips():
     if os.environ.get("NDI_CONFIG_DIR"):
         return
     try:
-        with open(os.path.join(config_dir(), "config.json")) as f:
+        with open(os.path.join(config_dir(), "config.json"), encoding="utf-8-sig") as f:
             ip = json.load(f).get("camera_ip", "").strip()
     except (OSError, ValueError):
         ip = ""
@@ -42,7 +42,7 @@ def _ndi_extra_ips():
     else:
         own = os.path.expanduser("~/.ndi/ndi-config.v1.json")
     try:
-        with open(own) as f:
+        with open(own, encoding="utf-8-sig") as f:
             cfg = json.load(f)
     except (OSError, ValueError):
         cfg = {}
@@ -156,9 +156,11 @@ class NDISource:
         )
         self.vf = VideoFrameSync()
         self.receiver.frame_sync.set_video_frame(self.vf)
+        if not name.strip():
+            raise RuntimeError("Pick an NDI source first (press Refresh to look for cameras)")
         src = finder.get(name)
         if src is None:
-            raise RuntimeError(f"NDI source '{name}' not found")
+            raise RuntimeError(f"NDI source '{name}' not found. Check the camera is on, then press Refresh.")
         self.receiver.set_source(src)
         self._last_ts = None
         self.latest = LatestFrame()

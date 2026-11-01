@@ -58,9 +58,10 @@ def run(out_path):
     def ndi():
         assert HAVE_NDI, "NDI library did not load"
         f = NDIFinder()
+        time.sleep(3)  # give discovery a moment
         names = f.names()
         f.close()
-        return f"library loaded, discovery running ({len(names)} sources visible)"
+        return f"library loaded, {len(names)} sources visible: {', '.join(names) or 'none'}"
 
     def detector():
         d = HeadDetector(default_model_path())

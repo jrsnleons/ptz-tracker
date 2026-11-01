@@ -68,7 +68,7 @@ DEFAULT_CONFIG = {
 def load_config():
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     try:
-        with open(CONFIG_PATH) as f:
+        with open(CONFIG_PATH, encoding="utf-8-sig") as f:  # -sig: Notepad/PowerShell add a BOM
             saved = json.load(f)
         tracking = {**cfg["tracking"], **saved.pop("tracking", {})}
         stage = {**cfg["stage"], **saved.pop("stage", {})}
@@ -1175,7 +1175,7 @@ class MainWindow(QMainWindow):
         go.setObjectName("primary")
         go.clicked.connect(self.connect_camera)
         v.addWidget(go)
-        self.card_status = label("", "muted")
+        self.card_status = label("", "muted", wrap=True)
         v.addWidget(self.card_status)
         return card
 
