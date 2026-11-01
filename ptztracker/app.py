@@ -1860,7 +1860,9 @@ def main():
     if "--selftest" in sys.argv:
         from .selftest import run
 
-        sys.exit(run(sys.argv[sys.argv.index("--selftest") + 1]))
+        code = run(sys.argv[sys.argv.index("--selftest") + 1])
+        logging.shutdown()
+        os._exit(code)  # skip interpreter teardown: the test leaves NDI/ORT threads behind
     try:
         w = MainWindow()
     except Exception as e:

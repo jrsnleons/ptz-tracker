@@ -16,7 +16,7 @@ jobs:
       - name: Version from tag
         shell: pwsh
         run: |
-          $v = "1.1.0"
+          $v = "1.1.1"
           if ("${{ github.ref }}" -match "refs/tags/v([0-9.]+)") { $v = $Matches[1] }
           "PTZ_VERSION=$v" >> $env:GITHUB_ENV
       - name: Install Inno Setup
@@ -28,9 +28,9 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          $p = Start-Process -FilePath "dist\PTZ Tracker\PTZ Tracker.exe" -ArgumentList "--selftest", "$PWD\selftest.txt" -PassThru -Wait
+          Start-Process -FilePath "dist\PTZ Tracker\PTZ Tracker.exe" -ArgumentList "--selftest", "$PWD\selftest.txt" -Wait
           Get-Content selftest.txt
-          if ($p.ExitCode -ne 0) { Get-Content "$env:LOCALAPPDATA\PTZ Tracker\Logs\app.log" -ErrorAction SilentlyContinue; exit 1 }
+          if ((Get-Content selftest.txt -Tail 1) -ne "OK") { Get-Content "$env:LOCALAPPDATA\PTZ Tracker\Logs\app.log" -ErrorAction SilentlyContinue; exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: PTZ-Tracker-windows
