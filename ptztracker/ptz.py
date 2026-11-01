@@ -7,9 +7,40 @@ Internal convention for every backend:
     focus in [-1, 1] (+ = far)
 """
 import collections
+import logging
 import socket
 import threading
 import time
+
+log = logging.getLogger(__name__)
+
+COMMANDS = {"pan_tilt", "zoom", "focus", "autofocus", "one_push_af", "home", "recall_preset", "store_preset", "stop"}
+
+
+class Guarded:
+    """Wraps a backend so a failed camera command is logged instead of crashing the app.
+
+    Manual moves run inside Qt mouse/key handlers, where an escaping error can take the whole app down on Windows."""
+
+    def __init__(self, backend):
+        self._backend = backend
+        self._err_at = 0.0
+
+    def __getattr__(self, name):
+        attr = getattr(self._backend, name)
+        if name not in COMMANDS:
+            return attr
+
+        def call(*args, **kwargs):
+            try:
+                return attr(*args, **kwargs)
+            except Exception:
+                now = time.monotonic()
+                if now - self._err_at > 3:  # a held key repeats the same error many times a second
+                    self._err_at = now
+                    log.exception("camera command %s%s failed", name, args)
+
+        return call
 
 
 class PTZBase:
@@ -226,7 +257,8 @@ class NDIPTZ(PTZBase):
         self.src = ndi_source
         self._last = None
         self._last_zoom = None
-        self.lock = threading.RLock()  # the GUI (manual moves) and the worker (tracking) both send
+        # the GUI (manual moves), the worker (tracking) and the video thread all call into the NDI receiver
+        self.lock = ndi_source.lock
 
     @property
     def ptz(self):

@@ -7,6 +7,8 @@ On first run, when Windows Firewall asks, allow PTZ Tracker on **Private network
 Windows may show "Windows protected your PC" because the app isn't code-signed: click **More info → Run anyway**.
 
 ### What's new
+- **Moving the camera no longer crashes the app.** A camera command that fails (from the arrows, keys, dragging on the video or scrolling to zoom) is now logged instead of closing PTZ Tracker, and NDI camera commands no longer run at the same moment as the video thread.
+- If the app ever does close by itself, it now leaves `crash.log` next to `app.log` (*Settings → Camera → Open log folder*) saying exactly where it stopped. Please send both files.
 - **Tested on Windows 11** against the church's LWNRA-PTZ_CAM over NDI: live video in the window, with detection falling back to the CPU when the GPU can't run it.
 - Settings files edited in Notepad or PowerShell (which add a byte-order mark) load instead of silently resetting; hints in the connect card wrap instead of being cut off; a clearer message when no NDI source is picked.
 - **Camera video fixed.** If GPU (DirectML) detection failed on a PC, the video thread stopped and the picture never appeared. Detection now checks the GPU on start-up and falls back to the CPU, and a bad frame can no longer stop the video.

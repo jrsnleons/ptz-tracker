@@ -163,39 +163,40 @@ class NDISource:
             raise RuntimeError(f"NDI source '{name}' not found. Check the camera is on, then press Refresh.")
         self.receiver.set_source(src)
         self._last_ts = None
+        self.lock = threading.RLock()  # shared with NDIPTZ: one NDI call at a time
         self.latest = LatestFrame()
         self._run = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def _grab(self):
+        """Newest frame, or (None, seconds to wait before trying again)."""
         if not self.receiver.is_connected():
-            time.sleep(0.02)
-            return None
+            return None, 0.02
         self.receiver.frame_sync.capture_video()
         xres, yres = self.vf.xres, self.vf.yres
         if xres == 0 or yres == 0:
-            time.sleep(0.01)
-            return None
+            return None, 0.01
         ts = self.vf.get_timestamp_posix()
         if ts == self._last_ts:
-            time.sleep(0.002)  # no new frame yet
-            return None
+            return None, 0.002  # no new frame yet
         self._last_ts = ts
         arr = np.asarray(self.vf.get_array())
         stride = self.vf.get_line_stride() or xres * 4
         img = arr[: stride * yres].reshape(yres, stride // 4, 4)[:, :xres, :3]
-        return np.ascontiguousarray(img)
+        return np.ascontiguousarray(img), 0
 
     def _loop(self):
         while self._run:
             try:
-                frame = self._grab()
+                with self.lock:  # sleep outside it, so camera commands never wait behind the video thread
+                    frame, wait = self._grab()
             except Exception:
-                time.sleep(0.1)
-                continue
+                frame, wait = None, 0.1
             if frame is not None:
                 self.latest.put(frame)
+            if wait:
+                time.sleep(wait)
 
     def read(self, timeout=0.05):
         """Newest frame and when it arrived, or (None, 0) if nothing new came within `timeout`."""

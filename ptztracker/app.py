@@ -1,4 +1,5 @@
 """PTZ Tracker — auto head tracking + manual PTZ control in one window (macOS and Windows)."""
+import faulthandler
 import json
 import logging
 import os
@@ -1001,8 +1002,8 @@ class MainWindow(QMainWindow):
         self.view.drag_end.connect(lambda: self.manual_release("mouse"))
         self.view.wheel_zoom.connect(self._wheel_zoom)
         self.worker.frame_ready.connect(self._show_frame)
-        self.worker.error.connect(self.statusBar().showMessage)
-        self.worker.stage_event.connect(self.statusBar().showMessage)
+        self.worker.error.connect(self._status)
+        self.worker.stage_event.connect(self._status)
         self.worker.tracking_stopped.connect(lambda: self.set_tracking(False))
         self.view.rect_drawn.connect(self.stage_drawn)
         self.view.bounds_edited.connect(self._bounds_edited)
@@ -1062,6 +1063,9 @@ class MainWindow(QMainWindow):
         self.worker.start()
         self.statusBar().showMessage(f"Detector ready on {self.detector.provider.replace('ExecutionProvider', '')}")
         QApplication.instance().installEventFilter(self)
+
+    def _status(self, msg):
+        self.statusBar().showMessage(msg)
 
     def _show_frame(self, data):
         try:
@@ -1209,11 +1213,11 @@ class MainWindow(QMainWindow):
 
             ctrl = self.control_kind.currentText()
             if ctrl == "VISCA over IP":
-                self.cam = ptzmod.VISCAoverIP(self.ip_edit.text().strip(), self.port_spin.value(), self.raw_check.isChecked())
+                self.cam = ptzmod.Guarded(ptzmod.VISCAoverIP(self.ip_edit.text().strip(), self.port_spin.value(), self.raw_check.isChecked()))
             elif ctrl == "NDI PTZ":
                 if not isinstance(self.source, NDISource):
                     raise RuntimeError("NDI PTZ needs the video source to be NDI")
-                self.cam = ptzmod.NDIPTZ(self.source)
+                self.cam = ptzmod.Guarded(ptzmod.NDIPTZ(self.source))
             else:
                 self.cam = ptzmod.PTZBase()
         except Exception as e:
@@ -1806,6 +1810,9 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+_crash_file = None
+
+
 def setup_logging():
     """Errors (including ones in background threads) go to app.log, since the Windows app has no console."""
     try:
@@ -1818,6 +1825,13 @@ def setup_logging():
     root.addHandler(handler)
     root.setLevel(logging.INFO)
     sys.excepthook = lambda *exc: log.critical("uncaught error", exc_info=exc)
+    try:  # a hard crash (inside Qt, NDI or the GPU driver) writes every thread's stack here
+        global _crash_file
+        _crash_file = open(os.path.join(os.path.dirname(APP_LOG), "crash.log"), "a", buffering=1)
+        _crash_file.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} start\n")
+        faulthandler.enable(_crash_file, all_threads=True)
+    except OSError:
+        pass
     threading.excepthook = lambda a: log.critical("uncaught error in %s", a.thread, exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
 
 
