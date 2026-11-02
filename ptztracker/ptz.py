@@ -14,7 +14,10 @@ import time
 
 log = logging.getLogger(__name__)
 
-COMMANDS = {"pan_tilt", "zoom", "focus", "autofocus", "one_push_af", "home", "recall_preset", "store_preset", "stop"}
+COMMANDS = {
+    "pan_tilt", "zoom", "focus", "autofocus", "one_push_af", "home", "recall_preset", "store_preset", "stop",
+    "exposure_mode", "exposure_level", "exposure_fine", "white_balance_mode", "white_balance_rgb", "aperture",
+}  # fmt: skip
 
 
 class Guarded:
@@ -45,6 +48,7 @@ class Guarded:
 
 class PTZBase:
     name = "None"
+    caps = frozenset()  # picture controls this backend can send: "exposure", "wb", "aperture"
 
     def pan_tilt(self, pan, tilt):
         pass
@@ -74,6 +78,26 @@ class PTZBase:
         self.pan_tilt(0, 0)
         self.zoom(0)
 
+    # picture settings: levels are 0..1; modes are "auto" | "manual" (exposure) and
+    # "auto" | "indoor" | "outdoor" | "once" | "manual" (white balance)
+    def exposure_mode(self, mode):
+        pass
+
+    def exposure_level(self, level):
+        pass
+
+    def exposure_fine(self, iris, gain, shutter):
+        pass
+
+    def white_balance_mode(self, mode):
+        pass
+
+    def white_balance_rgb(self, red, blue):
+        pass
+
+    def aperture(self, level):
+        pass
+
     def close(self):
         pass
 
@@ -86,8 +110,12 @@ class VISCAoverIP(PTZBase):
     "VISCA over IP" is enabled in the camera's web settings."""
 
     name = "VISCA over IP"
+    caps = frozenset({"exposure", "wb", "aperture"})
     PAN_MAX = 0x18
     TILT_MAX = 0x14
+    # Sony-style picture ranges (the camera clamps what it doesn't support)
+    COMP_MAX, IRIS, GAIN, SHUTTER, APERTURE_MAX = 14, (0x05, 0x11), (0x01, 0x0F), (0x00, 0x15), 0x0F
+    WB_MODES = {"auto": 0x00, "indoor": 0x01, "outdoor": 0x02, "once": 0x03, "manual": 0x05}
 
     ERRORS = {
         0x01: "message length error", 0x02: "syntax error", 0x03: "command buffer full",
@@ -113,6 +141,7 @@ class VISCAoverIP(PTZBase):
         self._last_pt = None
         self._last_zoom = None
         self._last_focus = None
+        self._wb = None
         self.sent = 0
         self._reset_sequence()
 
@@ -233,6 +262,43 @@ class VISCAoverIP(PTZBase):
         self.pan_tilt(0, 0)
         self.zoom(0)
 
+    def _direct(self, cmd, value):
+        """Direct-value camera command: 81 01 04 <cmd> 0p 0q 0r 0s FF, the value split into nibbles."""
+        v = max(0, min(0xFFFF, int(value)))
+        self.send(bytes([0x81, 0x01, 0x04, cmd, v >> 12 & 0xF, v >> 8 & 0xF, v >> 4 & 0xF, v & 0xF, 0xFF]))
+
+    @staticmethod
+    def _scaled(level, lo, hi):
+        return lo + round(min(1.0, max(0.0, level)) * (hi - lo))
+
+    def exposure_mode(self, mode):
+        self.send(bytes([0x81, 0x01, 0x04, 0x39, 0x00 if mode == "auto" else 0x03, 0xFF]))
+
+    def exposure_level(self, level):
+        """Brightness: exposure compensation on, then its position (-7..+7 = 0..14)."""
+        self.send(bytes([0x81, 0x01, 0x04, 0x3E, 0x02, 0xFF]))
+        self._direct(0x4E, self._scaled(level, 0, self.COMP_MAX))
+
+    def exposure_fine(self, iris, gain, shutter):
+        self._direct(0x4B, self._scaled(iris, *self.IRIS))
+        self._direct(0x4C, self._scaled(gain, *self.GAIN))
+        self._direct(0x4A, self._scaled(shutter, *self.SHUTTER))
+
+    def white_balance_mode(self, mode):
+        self._wb = mode
+        self.send(bytes([0x81, 0x01, 0x04, 0x35, self.WB_MODES.get(mode, 0x00), 0xFF]))
+        if mode == "once":
+            self.send(bytes([0x81, 0x01, 0x04, 0x10, 0x05, 0xFF]))  # trigger the one-push measurement
+
+    def white_balance_rgb(self, red, blue):
+        if self._wb != "manual":
+            self.white_balance_mode("manual")
+        self._direct(0x43, self._scaled(red, 0, 0xFF))
+        self._direct(0x44, self._scaled(blue, 0, 0xFF))
+
+    def aperture(self, level):
+        self._direct(0x42, self._scaled(level, 0, self.APERTURE_MAX))
+
     def close(self):
         try:
             self.stop()
@@ -252,11 +318,14 @@ class NDIPTZ(PTZBase):
     """PTZ through the NDI connection (what the Windows tracker used)."""
 
     name = "NDI PTZ"
+    caps = frozenset({"exposure", "wb"})  # NDI has no contrast / sharpness / saturation
 
     def __init__(self, ndi_source):
         self.src = ndi_source
         self._last = None
         self._last_zoom = None
+        self._fine = (0.5, 0.0, 0.5)  # iris, gain, shutter: what "manual" exposure starts from
+        self._rb = (0.5, 0.5)
         # the GUI (manual moves), the worker (tracking) and the video thread all call into the NDI receiver
         self.lock = ndi_source.lock
 
@@ -323,6 +392,38 @@ class NDIPTZ(PTZBase):
             self._last_zoom = None
             self.pan_tilt(0, 0)
             self.zoom(0)
+
+    def exposure_mode(self, mode):
+        with self.lock:
+            if self._ok():
+                self.ptz.exposure_auto() if mode == "auto" else self.ptz.set_exposure_fine(*self._fine)
+
+    def exposure_level(self, level):
+        with self.lock:
+            if self._ok():
+                self.ptz.set_exposure_coarse(level)
+
+    def exposure_fine(self, iris, gain, shutter):
+        with self.lock:
+            self._fine = (iris, gain, shutter)
+            if self._ok():
+                self.ptz.set_exposure_fine(iris, gain, shutter)
+
+    def white_balance_mode(self, mode):
+        with self.lock:
+            if not self._ok():
+                return
+            if mode == "manual":
+                self.ptz.set_white_balance(*self._rb)
+            else:
+                getattr(self.ptz, {"auto": "white_balance_auto", "indoor": "white_balance_indoor",
+                                   "outdoor": "white_balance_outdoor", "once": "white_balance_oneshot"}[mode])()  # fmt: skip
+
+    def white_balance_rgb(self, red, blue):
+        with self.lock:
+            self._rb = (red, blue)
+            if self._ok():
+                self.ptz.set_white_balance(red, blue)
 
     def status(self):
         r = self.src.receiver
