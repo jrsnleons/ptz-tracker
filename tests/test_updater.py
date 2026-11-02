@@ -94,7 +94,7 @@ def release_files():
     check("make_latest output parses", rel and rel.version == __version__ and set(rel.assets) == {"windows", "windows_zip", "mac"})
     name, sha = updater.pick_asset(rel, "mac")
     check("and the hash it wrote verifies the file", updater.verify_sha256(os.path.join(d, name), sha))
-    check("notes are the What's new section", rel.notes.startswith("- **Pick your own keys.**") and "### Install" not in rel.notes)
+    check("notes are the What's new section", rel.notes.startswith("- ") and "###" not in rel.notes)
 
 
 if __name__ == "__main__":

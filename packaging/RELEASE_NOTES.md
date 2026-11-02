@@ -1,6 +1,9 @@
-## PTZ Tracker 1.2.0
+## PTZ Tracker 1.2.1
 
 ### What's new
+- Checks that updating from inside the app works. Nothing else changed since 1.2.0.
+
+### In 1.2.0
 - **Pick your own keys.** *Settings → Shortcuts* lists every action with its key. Click a key, press the new one, done. If the key was already used, the old action is cleared and shows a note, so a key never does two things. *Restore default keys* undoes it all.
 - **Five speed levels from the keyboard.** Press **Z** for slower and **C** for faster (Crawl, Slow, Medium, Fast, Max). A short message on the video tells you the level, and the Manual panel has buttons for it too. Each level's speed can be changed in *Settings → Shortcuts*.
 - **Smoother arrow keys / WASD.** The camera now eases in and out instead of jerking, diagonals are no faster than straight moves, and when you are zoomed in the camera pans more gently (it needs the Camera IP filled in).
