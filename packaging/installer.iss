@@ -1,7 +1,11 @@
 ; Inno Setup script for the Windows installer. build_win.ps1 runs it after PyInstaller:
-;   iscc /DAppVersion=1.1.3 packaging\installer.iss  ->  dist\PTZ-Tracker-Setup.exe
+;   iscc /DAppVersion=1.2.0 packaging\installer.iss  ->  dist\PTZ-Tracker-Setup.exe
+; Without /DAppVersion the version is read from ptztracker\version.py (the one place it lives).
 #ifndef AppVersion
-  #define AppVersion "1.1.3"
+  #define VerFile FileOpen(SourcePath + "..\ptztracker\version.py")
+  #define VerLine FileRead(VerFile)
+  #expr FileClose(VerFile)
+  #define AppVersion Copy(VerLine, Pos('"', VerLine) + 1, RPos('"', VerLine) - Pos('"', VerLine) - 1)
 #endif
 
 [Setup]
@@ -36,4 +40,7 @@ Name: "{group}\PTZ Tracker"; Filename: "{app}\PTZ Tracker.exe"
 Name: "{autodesktop}\PTZ Tracker"; Filename: "{app}\PTZ Tracker.exe"; Tasks: desktopicon
 
 [Run]
+; normal install: the "Start PTZ Tracker" tick box on the last page
 Filename: "{app}\PTZ Tracker.exe"; Description: "Start PTZ Tracker"; Flags: nowait postinstall skipifsilent
+; silent install (the in-app updater): no last page, so start the app again straight away
+Filename: "{app}\PTZ Tracker.exe"; Flags: nowait; Check: WizardSilent

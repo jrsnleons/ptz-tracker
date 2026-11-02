@@ -1,10 +1,11 @@
 # Builds dist\PTZ Tracker\PTZ Tracker.exe, a zip, and (if Inno Setup is installed) dist\PTZ-Tracker-Setup.exe.
-# Run on Windows 10/11 x64 with Python 3.12. Set $env:PTZ_VERSION to stamp a version (default 1.1.3).
+# Run on Windows 10/11 x64 with Python 3.12. The version comes from ptztracker\version.py.
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
-if (-not $env:PTZ_VERSION) { $env:PTZ_VERSION = "1.1.3" }
 if (-not (Test-Path .venv-win)) { py -3.12 -m venv .venv-win }
 .\.venv-win\Scripts\python -m pip install -r requirements-windows.txt
+$env:PTZ_VERSION = (.\.venv-win\Scripts\python -c "from ptztracker.version import __version__; print(__version__)").Trim()
+Write-Host "Building PTZ Tracker $env:PTZ_VERSION"
 .\.venv-win\Scripts\python -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\ptz_tracker_win.spec
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 Compress-Archive -Force -Path "dist\PTZ Tracker" -DestinationPath "dist\PTZ-Tracker-windows.zip"

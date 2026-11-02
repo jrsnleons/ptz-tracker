@@ -4,6 +4,9 @@ import os
 from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
+_ns = {}
+exec(open(os.path.join(ROOT, "ptztracker", "version.py"), encoding="utf-8").read(), _ns)
+VERSION = _ns["__version__"]  # one place for the version: ptztracker/version.py
 
 a = Analysis(
     [os.path.join(SPECPATH, "launcher.py")],
@@ -23,7 +26,8 @@ app = BUNDLE(
     icon=os.path.join(ROOT, "assets", "icon.icns"),
     bundle_identifier="org.lwnra.ptztracker",
     info_plist={
-        "CFBundleShortVersionString": "1.0",
+        "CFBundleShortVersionString": VERSION,
+        "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "13.0",
         "NSHighResolutionCapable": True,
         "NSLocalNetworkUsageDescription": "PTZ Tracker finds NDI sources and controls the PTZ camera on your network.",

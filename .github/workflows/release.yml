@@ -1,0 +1,87 @@
+name: Release
+# Tag vX.Y.Z (matching ptztracker/version.py) to build both apps and publish one GitHub release.
+# "Run workflow" builds and self-tests both apps and keeps them as artifacts, without publishing.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Inno Setup
+        shell: pwsh
+        run: if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - run: pwsh packaging/build_win.ps1
+      - name: Smoke test the built app (NDI loads, detector runs, video reaches the window)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          Start-Process -FilePath "dist\PTZ Tracker\PTZ Tracker.exe" -ArgumentList "--selftest", "$PWD\selftest.txt" -Wait
+          Get-Content selftest.txt
+          if ((Get-Content selftest.txt -Tail 1) -ne "OK") { Get-Content "$env:LOCALAPPDATA\PTZ Tracker\Logs\app.log" -ErrorAction SilentlyContinue; exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PTZ-Tracker-windows
+          path: |
+            dist/PTZ-Tracker-windows.zip
+            dist/PTZ-Tracker-Setup.exe
+
+  mac:
+    runs-on: macos-14 # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt pyinstaller==6.22.3
+      - name: Build the app, ad-hoc sign it and zip it
+        run: PYTHON=python zsh packaging/build_app.sh
+      - name: Smoke test the built app (NDI loads, detector runs, video reaches the window)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          "dist/PTZ Tracker.app/Contents/MacOS/PTZ Tracker" --selftest "$PWD/selftest.txt" || true
+          cat selftest.txt
+          if [ "$(tail -n 1 selftest.txt)" != "OK" ]; then cat "$HOME/Library/Logs/PTZ Tracker/app.log" || true; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PTZ-Tracker-mac
+          path: dist/PTZ-Tracker-mac.zip
+
+  publish:
+    needs: [windows, mac]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Check the tag matches the app version
+        run: |
+          v=$(python -c "import re; print(re.search(r'\"(.+?)\"', open('ptztracker/version.py').read()).group(1))")
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          if [ "${GITHUB_REF_NAME}" != "v$v" ]; then echo "tag ${GITHUB_REF_NAME} does not match ptztracker/version.py ($v)"; exit 1; fi
+      - name: Write latest.json
+        run: python packaging/make_latest.py release
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: PTZ Tracker ${{ env.VERSION }}
+          body_path: packaging/RELEASE_NOTES.md
+          files: |
+            release/PTZ-Tracker-Setup.exe
+            release/PTZ-Tracker-windows.zip
+            release/PTZ-Tracker-mac.zip
+            release/latest.json
