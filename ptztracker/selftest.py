@@ -3,6 +3,7 @@
 Checks the parts that only break once packaged: the NDI library loads and discovery starts, the detector
 runs on the bundled model, the icon ships, and frames from a source reach the video view.
 """
+import os
 import threading
 import time
 import traceback
@@ -40,6 +41,7 @@ def _fake_source():
 
 
 def run(out_path):
+    os.environ["PTZ_NO_UPDATE_CHECK"] = "1"  # no network from the test
     lines, ok = [], True
 
     def check(name, fn):
@@ -69,14 +71,16 @@ def run(out_path):
         return f"{d.provider}, {len(dets)} detections on noise"
 
     def icon():
-        import os
-
         p = appmod.resource_path("assets", "icon.png")
         assert os.path.exists(p), p
         return p
 
     def video_to_view():
         w = appmod.MainWindow()
+        for i in range(w.tabs.count()):  # every settings tab builds and shows
+            w.open_settings(i)
+            QApplication.processEvents()
+        w.settings_dialog.hide()
         src = _fake_source()
         w.source = src
         w.worker.set_io(src, ptzmod.PTZBase())
