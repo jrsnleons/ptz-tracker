@@ -37,6 +37,7 @@ a = Analysis(
         (os.path.join(ROOT, "models", "head_640_v8s.onnx"), "models"),
         (os.path.join(ROOT, "assets", "icon.png"), "assets"),
         (os.path.join(ROOT, "assets", "icon.ico"), "assets"),
+        (os.path.join(ROOT, "ptztracker", "web", "remote.html"), os.path.join("ptztracker", "web")),
     ],
     hiddenimports=collect_submodules("cyndilib"),
     excludes=["tkinter", "PySide6.QtWebEngineCore", "PySide6.Qt3DCore", "PySide6.QtQuick", "PySide6.QtQml"],

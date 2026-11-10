@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#121314">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PTZ Remote">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon.png">
+<title>PTZ Remote</title>
+<style>
+:root {
+  --ground: #121314; --panel: #1B1C1E; --raised: #242629; --line: #303236; --hover: #2C2E32;
+  --ink: #EDEEF0; --ink2: #A3A7AD; --ink3: #8A8F96; --dim: #5A5D63;
+  --green: #3DD68C; --red: #F2555A; --amber: #F5A524;
+  --r: 14px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, system-ui, sans-serif;
+  --mono: ui-monospace, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; background: var(--ground); color: var(--ink); font-family: var(--font); overscroll-behavior: none; }
+body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+button { font: inherit; color: inherit; cursor: pointer; touch-action: manipulation; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+[hidden] { display: none !important; }
+
+/* ---------- pairing */
+#pair { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.pair-card { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 28px; display: flex; flex-direction: column; gap: 16px; }
+.pair-card h1 { margin: 0; font-size: 22px; }
+.pair-card p { margin: 0; color: var(--ink2); font-size: 14px; line-height: 1.5; }
+#pin { font: 600 34px/1 var(--mono); letter-spacing: 14px; text-align: center; padding: 14px 0 14px 14px; width: 100%; border-radius: 12px; border: 1px solid var(--line); background: var(--raised); color: var(--ink); -webkit-user-select: text; user-select: text; }
+#pairBtn { height: 52px; border: 0; border-radius: 12px; background: var(--ink); color: var(--ground); font-weight: 700; font-size: 16px; }
+#pairBtn:disabled { opacity: .5; }
+#pairErr { color: var(--red); font-size: 14px; min-height: 20px; }
+
+/* ---------- app shell */
+#app { height: 100%; display: flex; flex-direction: column; }
+header { flex: none; height: 52px; padding: 0 16px; padding-top: env(safe-area-inset-top); height: calc(52px + env(safe-area-inset-top)); display: flex; align-items: center; gap: 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.dot { width: 10px; height: 10px; border-radius: 5px; background: var(--dim); flex: none; }
+.dot.on { background: var(--green); }
+.dot.warn { background: var(--amber); }
+.brand { font-weight: 700; font-size: 16px; white-space: nowrap; }
+#camName { color: var(--ink2); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.grow { flex: 1; }
+#latency { font: 500 13px var(--mono); color: var(--ink2); white-space: nowrap; }
+#peers { font-size: 13px; color: var(--ink2); padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; white-space: nowrap; }
+#banner { flex: none; background: #3A2A10; color: var(--amber); font-size: 14px; font-weight: 600; text-align: center; padding: 8px 12px; }
+
+main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); overflow-y: auto; }
+.col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+/* ---------- video */
+.video { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #0B0C0D; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; touch-action: none; flex: none; }
+.video canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.video .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px; color: var(--ink3); font-size: 14px; }
+.chip { position: absolute; font: 500 12px var(--mono); background: rgba(0,0,0,.6); padding: 4px 8px; border-radius: 6px; pointer-events: none; }
+#fpsChip { right: 10px; top: 10px; }
+#hint { left: 10px; bottom: 10px; font: 13px var(--font); padding: 6px 10px; border-radius: 8px; }
+
+/* ---------- buttons */
+.btn { min-height: 48px; border-radius: 12px; background: var(--raised); border: 1px solid var(--line); font-size: 15px; font-weight: 600; padding: 0 12px; }
+.btn:active, .btn.down { background: #34373B; }
+.row { display: flex; gap: 10px; align-items: stretch; }
+#trackBtn { flex: 1; min-height: 68px; border: 0; border-radius: var(--r); background: var(--raised); text-align: left; padding: 0 18px; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+#trackBtn .t1 { font-size: 18px; font-weight: 700; }
+#trackBtn .t2 { font-size: 13px; color: var(--ink2); }
+#trackBtn.on { background: var(--green); color: #0B1A12; }
+#trackBtn.on .t2 { color: #0B1A12; }
+#stageBtn { background: var(--ink); color: var(--ground); border: 0; font-weight: 700; min-width: 108px; min-height: 68px; border-radius: var(--r); }
+#releaseBtn, #autoBtn { min-height: 68px; min-width: 104px; border-radius: var(--r); }
+#autoBtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
+.switch { width: 38px; height: 22px; border-radius: 11px; background: var(--line); position: relative; display: block; transition: background .15s; }
+.switch::after { content: ""; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 8px; background: var(--ink2); transition: transform .15s; }
+.on > .switch { background: var(--green); }
+.on > .switch::after { transform: translateX(16px); background: #0B1A12; }
+
+.label { font-size: 13px; font-weight: 600; color: var(--ink2); }
+.sub { font-size: 12px; color: var(--ink3); }
+.head { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+
+/* presets */
+.presets { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.preset { min-height: 58px; border-radius: 10px; background: var(--raised); border: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 2px; min-width: 0; }
+.preset b { font-size: 17px; }
+.preset span { font-size: 11px; color: var(--ink2); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preset.stage { border: 2px solid var(--amber); }
+.preset.stage span { color: var(--amber); font-weight: 600; }
+.storing .preset { border-style: dashed; border-color: var(--amber); }
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 3px; background: var(--raised); border-radius: 10px; padding: 3px; }
+.seg button { min-height: 36px; border: 0; border-radius: 7px; background: transparent; color: var(--ink2); font-weight: 600; font-size: 14px; padding: 0 10px; }
+.seg button.sel { background: var(--ink); color: var(--ground); font-weight: 700; }
+#storeBtn { min-height: 36px; border-radius: 8px; background: transparent; border: 1px dashed var(--dim); color: var(--ink2); font-size: 13px; font-weight: 600; padding: 0 12px; }
+#storeBtn.on { background: var(--amber); border: 1px solid var(--amber); color: #2A1A00; }
+
+/* manual */
+.manual { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+.pad-row { display: flex; gap: 16px; align-items: center; justify-content: center; }
+.joy { position: relative; width: min(236px, 58vw); aspect-ratio: 1; border-radius: 50%; background: var(--raised); border: 1px solid var(--line); touch-action: none; flex: none; }
+.joy::before, .joy::after { content: ""; position: absolute; background: var(--line); }
+.joy::before { left: calc(50% - 1px); top: 9%; width: 2px; height: 82%; }
+.joy::after { top: calc(50% - 1px); left: 9%; height: 2px; width: 82%; }
+.thumb { position: absolute; left: 50%; top: 50%; width: 31%; aspect-ratio: 1; border-radius: 50%; background: var(--ink); transform: translate(-50%, -50%); z-index: 1; box-shadow: 0 2px 10px rgba(0,0,0,.4); transition: transform .12s ease-out; pointer-events: none; }
+.joy.active .thumb { transition: none; }
+.zoom { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.rocker { width: 76px; height: min(210px, 52vw); border-radius: 38px; background: var(--raised); border: 1px solid var(--line); display: flex; flex-direction: column; overflow: hidden; }
+.rocker button { flex: 1; border: 0; background: transparent; font-size: 28px; touch-action: none; }
+.rocker button + button { border-top: 1px solid var(--line); }
+.rocker button.down { background: #34373B; }
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.grid4 .btn { touch-action: none; font-weight: 500; font-size: 14px; }
+#stopBtn { min-height: 60px; border-radius: var(--r); background: transparent; border: 2px solid var(--red); color: var(--red); font-size: 17px; font-weight: 700; width: 100%; flex: none; }
+#stopBtn:active { background: rgba(242, 85, 90, .16); }
+
+#toast { position: fixed; left: 50%; top: calc(70px + env(safe-area-inset-top)); transform: translateX(-50%); background: rgba(27,28,30,.96); border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px; font-size: 14px; font-weight: 600; z-index: 10; pointer-events: none; opacity: 0; transition: opacity .2s; max-width: calc(100% - 32px); text-align: center; }
+#toast.show { opacity: 1; }
+#tabs { display: none; }
+
+/* ---------- phone portrait: tabs between Move and Presets */
+@media (max-width: 599px) {
+  header #peers, header #camName { display: none; }
+  main { padding: 0 0 calc(12px + env(safe-area-inset-bottom)); gap: 12px; }
+  .video { border-radius: 0; border-left: 0; border-right: 0; border-top: 0; }
+  main > .col > :not(.video-wrap) { margin-left: 12px; margin-right: 12px; }
+  #releaseBtn, #autoBtn { display: none; }
+  #tabs { display: grid; }
+  body[data-tab="move"] .presets-box { display: none; }
+  body[data-tab="presets"] .manual { display: none; }
+  .manual { background: transparent; border: 0; padding: 0; }
+  .manual .head { display: none; }
+  #hint { display: none; }
+  .extra-row { display: flex !important; }
+  #stopBtn { width: auto; position: sticky; bottom: 8px; z-index: 2; background: #22171A; box-shadow: 0 -8px 16px var(--ground); }
+  main { overflow-x: hidden; }
+}
+.extra-row { display: none; gap: 8px; }
+.extra-row .btn { flex: 1; }
+
+/* ---------- tablet landscape: video + presets left, manual right */
+@media (min-width: 900px) and (orientation: landscape) {
+  main { flex-direction: row; padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); gap: 16px; overflow: hidden; }
+  .col.left { flex: 1.7; overflow-y: auto; }
+  .col.right { flex: 1; max-width: 420px; }
+  .presets { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+  .manual { flex: 1; overflow-y: auto; }
+  .video { max-height: calc(100vh - 330px); width: auto; align-self: center; max-width: 100%; }
+}
+/* tablet portrait / small landscape: one column, everything visible */
+@media (min-width: 600px) and (max-width: 899px), (min-width: 600px) and (orientation: portrait) {
+  main { max-width: 820px; width: 100%; margin: 0 auto; }
+}
+</style>
+</head>
+<body data-tab="move">
+
+<section id="pair" hidden>
+  <form class="pair-card" id="pairForm">
+    <h1>PTZ Remote</h1>
+    <p>Enter the PIN shown on the PC in <b>PTZ Tracker → Settings → Remote</b>.</p>
+    <label for="pin" class="label">Pairing PIN</label>
+    <input id="pin" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code" placeholder="••••">
+    <div id="pairErr" role="alert"></div>
+    <button id="pairBtn" type="submit">Pair this device</button>
+  </form>
+</section>
+
+<div id="app" hidden>
+  <header>
+    <span class="dot" id="dot"></span>
+    <span class="brand">PTZ Remote</span>
+    <span id="camName"></span>
+    <span class="grow"></span>
+    <span id="latency"></span>
+    <span id="peers"></span>
+  </header>
+  <div id="banner" hidden></div>
+
+  <main>
+    <div class="col left">
+      <div class="video-wrap">
+        <div class="video" id="video">
+          <canvas id="canvas"></canvas>
+          <div class="empty" id="videoEmpty">Waiting for video…</div>
+          <span class="chip" id="fpsChip" hidden></span>
+          <span class="chip" id="hint">Tap a head to follow · drag to move</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="trackBtn" type="button"><span class="t1">Start tracking</span><span class="t2">Follows the speaker on stage</span></button>
+        <button id="releaseBtn" class="btn" type="button">Release</button>
+        <button id="autoBtn" class="btn" type="button" aria-pressed="false"><span>Auto-pick</span><span class="switch"></span></button>
+        <button id="stageBtn" type="button">Stage shot</button>
+      </div>
+
+      <div class="seg" id="tabs" role="tablist">
+        <button type="button" data-tab="move" class="sel" role="tab">Move</button>
+        <button type="button" data-tab="presets" role="tab">Presets</button>
+      </div>
+
+      <div class="presets-box col" style="gap: 8px">
+        <div class="head">
+          <span class="label">Presets</span>
+          <span class="grow"></span>
+          <button id="storeBtn" type="button" hidden>Store</button>
+          <div class="seg" id="bankSeg">
+            <button type="button" data-bank="0" class="sel">1–10</button>
+            <button type="button" data-bank="1">11–20</button>
+          </div>
+        </div>
+        <div class="presets" id="presets"></div>
+      </div>
+    </div>
+
+    <div class="col right">
+      <div class="manual">
+        <div class="head"><span class="label">Manual</span><span class="grow"></span><span class="sub">Pauses tracking while held</span></div>
+        <div class="pad-row">
+          <div class="joy" id="joy" role="application" aria-label="Pan and tilt joystick"><div class="thumb" id="thumb"></div></div>
+          <div class="zoom">
+            <span class="label">Zoom</span>
+            <div class="rocker">
+              <button type="button" data-hold="zoom" data-d="1" aria-label="Zoom in">+</button>
+              <button type="button" data-hold="zoom" data-d="-1" aria-label="Zoom out">−</button>
+            </div>
+          </div>
+        </div>
+        <div class="col" style="gap: 8px">
+          <span class="label">Focus</span>
+          <div class="grid4">
+            <button type="button" class="btn" data-hold="focus" data-d="-1">Near</button>
+            <button type="button" class="btn" data-hold="focus" data-d="1">Far</button>
+            <button type="button" class="btn" data-act="focus_once">Once</button>
+            <button type="button" class="btn" data-act="focus_auto">Auto</button>
+          </div>
+        </div>
+        <div class="col" style="gap: 8px">
+          <div class="head" style="display: flex"><span class="label">Speed</span><span class="grow"></span><span id="speedName" style="font-size: 13px"></span></div>
+          <div class="seg" id="speedSeg"></div>
+        </div>
+        <div class="extra-row">
+          <button type="button" class="btn" id="releaseBtn2">Release</button>
+          <button type="button" class="btn" data-act="home">Camera home</button>
+        </div>
+      </div>
+      <button id="stopBtn" type="button">Stop camera</button>
+    </div>
+  </main>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+    del(k) { try { localStorage.removeItem(k); } catch (e) {} },
+  };
+  const REPEAT_MS = 100;   // held controls repeat this often; the PC lets go after 300 ms of silence
+  let token = store.get("ptz_token");
+  let ws = null, retry = 0, everConnected = false;
+  let state = {};
+  let bank = 0, storing = false;
+  let toastTimer = 0;
+
+  // ---------------------------------------------------------------- pairing
+  function deviceName() {
+    const ua = navigator.userAgent;
+    const dev = /iPad|Macintosh/.test(ua) && navigator.maxTouchPoints > 1 ? "iPad" : /iPhone/.test(ua) ? "iPhone"
+      : /Android/.test(ua) ? (/Mobile/.test(ua) ? "Android phone" : "Android tablet") : /Windows/.test(ua) ? "Windows" : "Browser";
+    const br = /Edg\//.test(ua) ? "Edge" : /CriOS|Chrome\//.test(ua) ? "Chrome" : /FxiOS|Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "";
+    return br ? `${dev} · ${br}` : dev;
+  }
+  async function pair(pin) {
+    $("pairErr").textContent = "";
+    $("pairBtn").disabled = true;
+    try {
+      const r = await fetch("/api/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin, name: deviceName() }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.token) throw new Error(j.error || "Pairing failed");
+      token = j.token;
+      store.set("ptz_token", token);
+      showApp();
+    } catch (e) {
+      $("pairErr").textContent = e.message === "Failed to fetch" ? "Can't reach the PC" : e.message;
+      $("pin").select();
+    } finally {
+      $("pairBtn").disabled = false;
+    }
+  }
+  function showPair(msg) {
+    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    $("app").hidden = true;
+    $("pair").hidden = false;
+    $("pairErr").textContent = msg || "";
+    setTimeout(() => $("pin").focus(), 50);
+  }
+  function showApp() {
+    $("pair").hidden = true;
+    $("app").hidden = false;
+    connect();
+  }
+  $("pairForm").addEventListener("submit", (e) => { e.preventDefault(); pair($("pin").value); });
+  $("pin").addEventListener("input", (e) => {
+    e.target.value = e.target.value.replace(/\D/g, "").slice(0, 4);
+    if (e.target.value.length === 4) pair(e.target.value);
+  });
+
+  // ---------------------------------------------------------------- connection
+  function setBanner(text) { $("banner").hidden = !text; $("banner").textContent = text || ""; }
+  async function connect() {
+    if (!token) return showPair();
+    try {
+      const r = await fetch("/api/check?token=" + encodeURIComponent(token), { cache: "no-store" });
+      if (r.status === 401) { store.del("ptz_token"); token = null; return showPair("This device was unpaired on the PC. Enter the new PIN."); }
+    } catch (e) {
+      return scheduleReconnect();
+    }
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+    ws.binaryType = "blob";
+    ws.onopen = () => { retry = 0; everConnected = true; setBanner(""); $("dot").className = "dot on"; ping(); };
+    ws.onmessage = onMessage;
+    ws.onclose = (e) => {
+      ws = null;
+      releaseAll(false);
+      $("dot").className = "dot warn";
+      $("latency").textContent = "";
+      if (e.code === 4003) { store.del("ptz_token"); token = null; return showPair("This device was unpaired on the PC."); }
+      if (e.code === 4001) setBanner("Disconnected from the PC · reconnecting…");
+      scheduleReconnect();
+    };
+  }
+  function scheduleReconnect() {
+    if (!$("banner").textContent) setBanner(everConnected ? "Lost the PC · reconnecting…" : "Can't reach PTZ Tracker on the PC · retrying…");
+    $("dot").className = "dot warn";
+    const wait = Math.min(5000, 500 * 2 ** retry++);
+    setTimeout(connect, wait);
+  }
+  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+  function act(a, extra) { send(Object.assign({ t: "act", a }, extra || {})); buzz(); }
+  function buzz() { if (navigator.vibrate) navigator.vibrate(8); }
+  function ping() { send({ t: "ping", ts: performance.now() }); }
+  setInterval(ping, 2000);
+
+  let pendingOv = null;
+  function onMessage(e) {
+    if (typeof e.data !== "string") { drawFrame(e.data, pendingOv); pendingOv = null; return; }
+    let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+    if (m.t === "pong") $("latency").textContent = Math.round(performance.now() - m.ts) + " ms";
+    else if (m.t === "state") { state = m; render(); }
+    else if (m.t === "ov") pendingOv = m;
+    else if (m.t === "toast") toast(m.text);
+  }
+  function toast(text) {
+    const el = $("toast");
+    el.textContent = text;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
+  }
+
+  // ---------------------------------------------------------------- state -> UI
+  const presetsEl = $("presets");
+  for (let i = 0; i < 10; i++) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "preset";
+    b.innerHTML = "<b></b><span></span>";
+    b.addEventListener("click", () => {
+      const n = bank * 10 + i + 1;
+      act("preset", { n, store: storing });
+      if (storing) setStoring(false);
+    });
+    presetsEl.appendChild(b);
+  }
+  const speedEl = $("speedSeg");
+  for (let i = 1; i <= 5; i++) {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = i;
+    b.addEventListener("click", () => act("speed", { n: i }));
+    speedEl.appendChild(b);
+  }
+  function render() {
+    const s = state;
+    $("camName").textContent = s.camera ? s.camera + " · via " + (s.host || "PC") : "No camera connected on the PC";
+    $("dot").className = "dot " + (ws ? (s.camera ? "on" : "warn") : "warn");
+    const others = (s.clients || 1) - 1;
+    $("peers").textContent = others > 0 ? `${others + 1} remotes` : "1 remote";
+    const tb = $("trackBtn");
+    tb.classList.toggle("on", !!s.tracking);
+    tb.querySelector(".t1").textContent = s.tracking ? "Tracking" : "Start tracking";
+    tb.querySelector(".t2").textContent = s.tracking ? "Following the speaker · tap to stop" : "Follows the speaker on stage";
+    tb.setAttribute("aria-pressed", s.tracking ? "true" : "false");
+    $("autoBtn").classList.toggle("on", !!s.auto_pick);
+    $("autoBtn").setAttribute("aria-pressed", s.auto_pick ? "true" : "false");
+    [...speedEl.children].forEach((b, i) => b.classList.toggle("sel", i + 1 === s.speed));
+    $("speedName").textContent = s.speed ? `${s.speed} · ${s.speed_name}` : "";
+    $("storeBtn").hidden = !s.allow_store;
+    if (!s.allow_store && storing) setStoring(false);
+    renderPresets();
+    $("videoEmpty").hidden = !!s.preview && !!lastFrameAt && performance.now() - lastFrameAt < 3000;
+    $("videoEmpty").textContent = !s.preview ? "Video preview is off on the PC" : s.camera ? "Waiting for video…" : "No camera connected on the PC";
+    $("hint").hidden = !s.preview;
+  }
+  function renderPresets() {
+    const names = state.preset_names || {}, stageN = state.stage_preset;
+    [...presetsEl.children].forEach((b, i) => {
+      const n = bank * 10 + i + 1;
+      const name = n === stageN ? "Stage" : names[n] || "";
+      b.querySelector("b").textContent = n;
+      b.querySelector("span").textContent = name;
+      b.querySelector("span").hidden = !name;
+      b.classList.toggle("stage", n === stageN);
+      b.setAttribute("aria-label", `Preset ${n}${name ? ", " + name : ""}`);
+    });
+    [...$("bankSeg").children].forEach((b) => b.classList.toggle("sel", +b.dataset.bank === bank));
+  }
+  function setStoring(on) {
+    storing = on;
+    $("storeBtn").classList.toggle("on", on);
+    $("storeBtn").textContent = on ? "Tap a preset…" : "Store";
+    presetsEl.classList.toggle("storing", on);
+  }
+  $("storeBtn").addEventListener("click", () => setStoring(!storing));
+  $("bankSeg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { bank = +b.dataset.bank; renderPresets(); } });
+  $("tabs").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    document.body.dataset.tab = b.dataset.tab;
+    [...$("tabs").children].forEach((x) => x.classList.toggle("sel", x === b));
+  });
+  $("trackBtn").addEventListener("click", () => act("track"));
+  $("releaseBtn").addEventListener("click", () => act("release"));
+  $("releaseBtn2").addEventListener("click", () => act("release"));
+  $("autoBtn").addEventListener("click", () => act("auto_pick", { on: !state.auto_pick }));
+  $("stageBtn").addEventListener("click", () => act("stage_shot"));
+  $("stopBtn").addEventListener("click", () => { releaseAll(true); act("stop"); });
+  document.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => act(b.dataset.act)));
+
+  // ---------------------------------------------------------------- held controls (repeat while held)
+  const holds = {};  // kind -> {msg, timer}
+  function hold(kind, msg) {
+    const h = holds[kind] || (holds[kind] = {});
+    h.msg = msg;
+    send(msg);
+    if (!h.timer) h.timer = setInterval(() => send(h.msg), REPEAT_MS);
+  }
+  function letGo(kind, zero) {
+    const h = holds[kind];
+    if (h && h.timer) clearInterval(h.timer);
+    delete holds[kind];
+    if (zero) send(zero);
+  }
+  function releaseAll(sendZero) {
+    const zero = { joy: { t: "joy", x: 0, y: 0 }, zoom: { t: "zoom", d: 0 }, focus: { t: "focus", d: 0 } };
+    Object.keys(holds).forEach((k) => letGo(k, sendZero && zero[k]));
+    resetThumb();
+    document.querySelectorAll(".down").forEach((b) => b.classList.remove("down"));
+  }
+  document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(true); });
+  window.addEventListener("blur", () => releaseAll(true));
+  window.addEventListener("pagehide", () => releaseAll(true));
+
+  document.querySelectorAll("[data-hold]").forEach((b) => {
+    const kind = b.dataset.hold, d = +b.dataset.d;
+    const down = (e) => { e.preventDefault(); b.setPointerCapture && b.setPointerCapture(e.pointerId); b.classList.add("down"); hold(kind, { t: kind, d }); buzz(); };
+    const up = () => { if (!b.classList.contains("down")) return; b.classList.remove("down"); letGo(kind, { t: kind, d: 0 }); };
+    b.addEventListener("pointerdown", down);
+    b.addEventListener("pointerup", up);
+    b.addEventListener("pointercancel", up);
+    b.addEventListener("lostpointercapture", up);
+    b.addEventListener("contextmenu", (e) => e.preventDefault());
+  });
+
+  // joystick: offset from centre -> -1..1, squared for fine control near the middle; up = tilt up
+  const joy = $("joy"), thumb = $("thumb");
+  let joyId = null;
+  function curve(x, y) {
+    const m = Math.hypot(x, y);
+    if (m < 0.08) return [0, 0];
+    const k = Math.min(1, (m - 0.08) / 0.92) ** 2 / m;
+    return [x * k, y * k];
+  }
+  function joyMove(e) {
+    const r = joy.getBoundingClientRect();
+    const R = r.width / 2;
+    let dx = (e.clientX - r.left - R) / R, dy = (e.clientY - r.top - R) / R;
+    const m = Math.hypot(dx, dy);
+    if (m > 1) { dx /= m; dy /= m; }
+    const travel = R - thumb.offsetWidth / 2;
+    thumb.style.transform = `translate(calc(-50% + ${dx * travel}px), calc(-50% + ${dy * travel}px))`;
+    const [x, y] = curve(dx, -dy);
+    hold("joy", { t: "joy", x: +x.toFixed(3), y: +y.toFixed(3) });
+  }
+  function resetThumb() { joy.classList.remove("active"); thumb.style.transform = ""; joyId = null; }
+  joy.addEventListener("pointerdown", (e) => { e.preventDefault(); joyId = e.pointerId; joy.setPointerCapture(e.pointerId); joy.classList.add("active"); joyMove(e); buzz(); });
+  joy.addEventListener("pointermove", (e) => { if (e.pointerId === joyId) joyMove(e); });
+  const joyUp = (e) => { if (e.pointerId !== joyId) return; resetThumb(); letGo("joy", { t: "joy", x: 0, y: 0 }); };
+  joy.addEventListener("pointerup", joyUp);
+  joy.addEventListener("pointercancel", joyUp);
+  joy.addEventListener("lostpointercapture", joyUp);
+
+  // ---------------------------------------------------------------- video: draw, tap to pick, drag to move
+  const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
+  let lastFrameAt = 0, frameTimes = [], drawing = false, lastOv = null, lastImg = null;
+  function fit() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(video.clientWidth * dpr), h = Math.round(video.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; paint(); }
+  }
+  new ResizeObserver(fit).observe(video);
+  async function drawFrame(blob, ov) {
+    if (drawing) return;  // still decoding the last one: skip, newer frames follow
+    drawing = true;
+    try {
+      const img = await createImageBitmap(blob);
+      if (lastImg && lastImg.close) lastImg.close();
+      lastImg = img; lastOv = ov;
+      const now = performance.now();
+      if (!lastFrameAt || now - lastFrameAt > 3000) render();
+      lastFrameAt = now;
+      frameTimes.push(now); while (frameTimes.length && now - frameTimes[0] > 2000) frameTimes.shift();
+      $("fpsChip").hidden = false;
+      $("fpsChip").textContent = `PREVIEW · ${Math.round(frameTimes.length / 2)} fps`;
+      $("videoEmpty").hidden = true;
+      paint();
+    } catch (e) { /* bad frame */ } finally { drawing = false; }
+  }
+  setInterval(() => { if (lastFrameAt && performance.now() - lastFrameAt > 3000) { lastFrameAt = 0; $("fpsChip").hidden = true; render(); } }, 1000);
+  function imgRect() {
+    const W = canvas.width, H = canvas.height;
+    if (!lastImg) return { x: 0, y: 0, w: W, h: H };
+    const s = Math.min(W / lastImg.width, H / lastImg.height);
+    const w = lastImg.width * s, h = lastImg.height * s;
+    return { x: (W - w) / 2, y: (H - h) / 2, w, h };
+  }
+  function paint() {
+    const W = canvas.width, H = canvas.height, dpr = window.devicePixelRatio || 1;
+    ctx.clearRect(0, 0, W, H);
+    if (!lastImg) return;
+    const r = imgRect();
+    ctx.drawImage(lastImg, r.x, r.y, r.w, r.h);
+    const ov = lastOv; if (!ov) return;
+    const X = (v) => r.x + v * r.w, Y = (v) => r.y + v * r.h;
+    if (ov.ignore < 1) {
+      ctx.fillStyle = "rgba(0,0,0,.43)"; ctx.fillRect(r.x, Y(ov.ignore), r.w, r.y + r.h - Y(ov.ignore));
+      ctx.strokeStyle = "rgba(255,80,80,.6)"; ctx.lineWidth = dpr; ctx.setLineDash([5 * dpr, 4 * dpr]);
+      ctx.beginPath(); ctx.moveTo(r.x, Y(ov.ignore)); ctx.lineTo(r.x + r.w, Y(ov.ignore)); ctx.stroke();
+    }
+    if (ov.stage && ov.stage.length) {
+      ctx.strokeStyle = "rgba(255,200,0,.85)"; ctx.lineWidth = 2 * dpr; ctx.setLineDash([7 * dpr, 5 * dpr]);
+      ctx.beginPath(); ov.stage.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)))); ctx.closePath(); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    (ov.dets || []).forEach((d, i) => {
+      ctx.strokeStyle = ov.off && ov.off[i] ? "rgba(130,130,130,.9)" : "rgba(130,130,255,.95)";
+      ctx.lineWidth = 2 * dpr;
+      ctx.strokeRect(X(d[0]), Y(d[1]), X(d[2]) - X(d[0]), Y(d[3]) - Y(d[1]));
+    });
+    if (ov.box) {
+      const c = ov.lost ? "#F5A524" : "#3DD68C";
+      const [x1, y1, x2, y2] = ov.box;
+      ctx.strokeStyle = c; ctx.lineWidth = 3 * dpr;
+      ctx.strokeRect(X(x1), Y(y1), X(x2) - X(x1), Y(y2) - Y(y1));
+      const tag = ov.lost ? "Lost" : "Following";
+      ctx.font = `700 ${12 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
+      const tw = ctx.measureText(tag).width + 12 * dpr, th = 20 * dpr;
+      ctx.fillStyle = c; ctx.fillRect(X(x1) - 1.5 * dpr, Y(y1) - th - 3 * dpr, tw, th);
+      ctx.fillStyle = ov.lost ? "#2A1A00" : "#0B2717"; ctx.textBaseline = "middle";
+      ctx.fillText(tag, X(x1) + 4.5 * dpr, Y(y1) - th / 2 - 3 * dpr);
+    }
+  }
+
+  let vDown = null;
+  video.addEventListener("pointerdown", (e) => {
+    if (vDown) return;
+    e.preventDefault();
+    video.setPointerCapture(e.pointerId);
+    vDown = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), drag: false };
+  });
+  video.addEventListener("pointermove", (e) => {
+    if (!vDown || e.pointerId !== vDown.id) return;
+    const dx = e.clientX - vDown.x, dy = e.clientY - vDown.y;
+    if (!vDown.drag && Math.hypot(dx, dy) < 12) return;
+    vDown.drag = true;
+    const R = Math.min(video.clientWidth, video.clientHeight) / 2.5;
+    let x = dx / R, y = -dy / R;
+    const m = Math.hypot(x, y); if (m > 1) { x /= m; y /= m; }
+    const [cx, cy] = curve(x, y);
+    hold("joy", { t: "joy", x: +cx.toFixed(3), y: +cy.toFixed(3) });
+  });
+  const vUp = (e, cancelled) => {
+    if (!vDown || e.pointerId !== vDown.id) return;
+    const d = vDown; vDown = null;
+    if (d.drag) { letGo("joy", { t: "joy", x: 0, y: 0 }); return; }
+    if (cancelled || !lastImg || performance.now() - d.t > 600) return;
+    const rect = video.getBoundingClientRect(), dpr = window.devicePixelRatio || 1, r = imgRect();
+    const x = ((e.clientX - rect.left) * dpr - r.x) / r.w, y = ((e.clientY - rect.top) * dpr - r.y) / r.h;
+    if (x >= 0 && x <= 1 && y >= 0 && y <= 1) act("pick", { x, y });
+  };
+  video.addEventListener("pointerup", (e) => vUp(e, false));
+  video.addEventListener("pointercancel", (e) => vUp(e, true));
+  video.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // keep the screen awake where the browser allows it (needs a secure page on most browsers)
+  async function wake() { try { if (navigator.wakeLock && !document.hidden) await navigator.wakeLock.request("screen"); } catch (e) {} }
+  document.addEventListener("visibilitychange", wake);
+
+  // ---------------------------------------------------------------- start
+  const m = location.hash.match(/pin=(\d{4})/);
+  if (m) {
+    history.replaceState(null, "", location.pathname);
+    $("pair").hidden = false;
+    $("pin").value = m[1];
+    pair(m[1]);
+  } else if (token) {
+    showApp();
+  } else {
+    showPair();
+  }
+  renderPresets();
+  wake();
+})();
+</script>
+</body>
+</html>

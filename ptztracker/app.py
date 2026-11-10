@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import keys, motion, picture, platform_paths, updater
+from .remote_ui import RemoteControl
 from . import ptz as ptzmod
 from .detector import HeadDetector, default_model_path
 from .sources import HAVE_NDI, CVSource, NDIFinder, NDISource
@@ -72,6 +73,7 @@ DEFAULT_CONFIG = {
     "auto_pick": True,
     "tracking": asdict(TrackSettings()),
     "stage": asdict(StageSettings()),
+    "remote": {},  # phone/tablet remote control; remote_ui.DEFAULTS fills it in
 }
 
 
@@ -82,9 +84,11 @@ def load_config():
             saved = json.load(f)
         tracking = {**cfg["tracking"], **saved.pop("tracking", {})}
         stage = {**cfg["stage"], **saved.pop("stage", {})}
+        remote = saved.pop("remote", {})
         cfg.update(saved)
         cfg["tracking"] = tracking
         cfg["stage"] = stage
+        cfg["remote"] = remote if isinstance(remote, dict) else {}
     except (OSError, ValueError):
         pass
     return motion.migrate_speed(cfg)
@@ -1141,6 +1145,7 @@ class MainWindow(QMainWindow):
         self.update_checked.connect(self._update_checked)
         self.update_progress.connect(self._update_progress)
         self.update_ready.connect(self._update_ready)
+        self.remote = RemoteControl(self)
         self.settings_dialog = self._settings_dialog()  # builds the camera options the connect card refers to
 
         # video with the connect card floating over it until a camera is connected
@@ -1200,6 +1205,8 @@ class MainWindow(QMainWindow):
             QTimer(self, interval=6 * 3600 * 1000, timeout=self._auto_check).start()
         self.worker.start()
         self.statusBar().showMessage(f"Detector ready on {self.detector.provider.replace('ExecutionProvider', '')}")
+        if self.cfg["remote"]["enabled"]:
+            self.remote.start()
         QApplication.instance().installEventFilter(self)
 
     def _status(self, msg):
@@ -1213,6 +1220,7 @@ class MainWindow(QMainWindow):
             log.exception("could not draw a frame")
         finally:
             self.worker.gui_busy = False
+        self.remote.frame(data)
         now = time.monotonic()
         if now - self._perf_at > 0.5:
             self._perf_at = now
@@ -1423,6 +1431,7 @@ class MainWindow(QMainWindow):
         else:
             stage = f"Stage pan {b.pan_min:+.1f}° to {b.pan_max:+.1f}°, tilt {b.tilt_min:+.1f}° to {b.tilt_max:+.1f}°"
         self.stage_status.setText(f"{pos}    {stage}")
+        self.remote.tick()
 
     # ---------------- control rail
     def _rail(self):
@@ -1461,6 +1470,7 @@ class MainWindow(QMainWindow):
         self.auto_pick = QCheckBox("Auto-pick biggest head")
         self.auto_pick.setChecked(self.cfg["auto_pick"])
         self.auto_pick.toggled.connect(lambda on: setattr(self.worker, "auto_pick", on))
+        self.auto_pick.toggled.connect(lambda _on: self.remote.push_state())
         rel = nofocus(QPushButton())
         rel.clicked.connect(self.worker.release_target)
 
@@ -1487,6 +1497,7 @@ class MainWindow(QMainWindow):
             self.track_btn.set_text("Start tracking", "Follows the speaker on stage")
         self.view.tracking = on
         self.view.update()
+        self.remote.push_state()
 
     # ---------------- stage boundary
     def _stage_box(self):
@@ -1832,6 +1843,7 @@ class MainWindow(QMainWindow):
             self.cam.zoom(self.zoom_held * self._level()["zoom"])
         if self.held or self.ramp.active:
             self._start_manual()
+        self.remote.push_state()
 
     def _level(self):
         return self.levels[self.speed_level - 1]
@@ -1924,6 +1936,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._stage_tab(), "Stage")
         self.tabs.addTab(self._shortcuts_tab(), "Shortcuts")
         self.tabs.addTab(self._picture_tab(), "Picture")
+        self.tabs.addTab(self.remote.tab(), "Remote")
         self.tabs.addTab(self._about_tab(), "About")
         v.addWidget(self.tabs, 1)
         done = QPushButton("Done")
@@ -2632,6 +2645,7 @@ class MainWindow(QMainWindow):
         save_config(self.cfg)
 
     def closeEvent(self, e):
+        self.remote.shutdown()
         self._save()
         self.disconnect_camera()
         self.worker.stop()

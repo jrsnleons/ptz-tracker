@@ -1,6 +1,13 @@
-## PTZ Tracker 1.2.1
+## PTZ Tracker 1.3.0
 
 ### What's new
+- **Control the camera from a tablet or phone.** While PTZ Tracker is open on the PC, an iPad, Android tablet or phone on the same Wi-Fi can run it from the browser. There's nothing to install. Turn it on in *Settings → Remote*, then scan the QR code (or type the address and the 4-digit PIN). Use *Add to Home Screen* to open it like an app.
+- The remote has a live preview (tap a head to follow it, drag to move the camera), start/stop tracking, Release, Auto-pick, Stage shot, presets 1–20, a joystick, zoom, focus, the five speed levels and Stop camera. On a phone, Move and Presets are two tabs.
+- **Safe by design.** Remote control is off until you turn it on, works only on your own network, and each device pairs once with the PIN. *New PIN* changes the PIN; *Forget all paired devices* unpairs every device. If the tablet drops off Wi-Fi, locks or switches apps while you hold the joystick or zoom, the camera stops within a third of a second.
+- The PC and any remotes can all drive at once, the last touch wins, and tracking, speed and preset names stay in sync on every screen. Storing presets from a remote is off by default (*Let remotes store presets*), and the stage shot preset can only be stored from the PC.
+- On Windows, allow PTZ Tracker through the firewall on **Private networks** when asked, or the tablet can't connect.
+
+### In 1.2.1
 - Checks that updating from inside the app works. Nothing else changed since 1.2.0.
 
 ### In 1.2.0

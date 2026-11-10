@@ -95,9 +95,32 @@ def run(out_path):
         assert img is not None, "no frame reached the video view in 15 s"
         return f"frame {img.width()}x{img.height()} painted, detector on {w.detector.provider}"
 
+    def remote():
+        import socket
+        import urllib.request
+
+        from . import remote as rm
+        from .remote_ui import qr_pixmap
+
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        srv = rm.RemoteServer(rm.RemoteBridge(), port, "1234")
+        srv.start()
+        try:
+            assert not srv.error, srv.error
+            page = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read()
+            assert b"PTZ Remote" in page, "remote page not served"
+        finally:
+            srv.stop()
+        assert qr_pixmap("http://127.0.0.1/#pin=1234") is not None, "qrcode missing"
+        return f"page served ({len(page)} bytes), QR code renders"
+
     check("NDI", ndi)
     check("detector", detector)
     check("icon", icon)
+    check("remote control", remote)
     check("video reaches the window", video_to_view)
     lines.append("OK" if ok else "FAILED")
     with open(out_path, "w", encoding="utf-8") as f:

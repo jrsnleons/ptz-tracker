@@ -13,7 +13,8 @@ a = Analysis(
     pathex=[ROOT],
     binaries=collect_dynamic_libs("cyndilib"),
     # detector.default_model_path() looks in ../models next to the package
-    datas=[(os.path.join(ROOT, "models", "head_640_v8s.onnx"), "models"), (os.path.join(ROOT, "assets", "icon.png"), "assets")],
+    datas=[(os.path.join(ROOT, "models", "head_640_v8s.onnx"), "models"), (os.path.join(ROOT, "assets", "icon.png"), "assets"),
+           (os.path.join(ROOT, "ptztracker", "web", "remote.html"), os.path.join("ptztracker", "web"))],
     hiddenimports=collect_submodules("cyndilib"),
     excludes=["tkinter", "PySide6.QtWebEngineCore", "PySide6.Qt3DCore", "PySide6.QtQuick", "PySide6.QtQml"],
 )

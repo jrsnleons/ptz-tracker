@@ -56,6 +56,9 @@ VISCA over IP must be turned on in the camera's web settings. If it doesn't resp
 - Using any manual control pauses tracking output until you let go.
 - Settings are saved to `~/Library/Application Support/PTZ Tracker/config.json` (`%APPDATA%\PTZ Tracker\config.json` on Windows).
 
+### Remote control (tablet / phone)
+*Settings → Remote → Allow phones and tablets to control the camera* starts a small web server on port 8765 (only while the app is open). On the tablet, scan the QR code, or open the address shown (`http://<PC address>:8765`) and enter the PIN. Each device pairs once and keeps a token; *New PIN* changes the PIN for new devices, *Forget all paired devices* unpairs everyone. The page is `ptztracker/web/remote.html` (plain HTML/JS, no build step); the server is `ptztracker/remote.py` (aiohttp on its own thread) and the window glue is `ptztracker/remote_ui.py`. Every remote button calls the same window method as the keyboard. Held controls (joystick, zoom, focus) repeat every 100 ms and the PC lets go of any that stay quiet for 300 ms, or when the device disconnects. Settings live under `"remote"` in `config.json`.
+
 ### Keys
 Every key can be changed in *Settings → Shortcuts* (click a key, press the new one; Esc cancels, Backspace clears; a key already in use moves to the new action). Each action holds two keys. Defaults:
 
