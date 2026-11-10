@@ -25,7 +25,7 @@ If tracking is on it asks to stop tracking first, and nothing ever installs on i
 
 ## Releasing
 
-Bump `ptztracker/version.py`, update `packaging/RELEASE_NOTES.md` (the *What's new* section also becomes the in-app notes), commit, then `git tag v1.2.1 && git push --tags`. `.github/workflows/release.yml` builds Windows (`windows-latest`) and Mac (`macos-14`), self-tests each build (`--selftest`), and a publish job writes `latest.json` and creates the GitHub release. *Run workflow* on its own builds and tests both without publishing.
+Bump `ptztracker/version.py`, update `packaging/RELEASE_NOTES.md` (the *What's new* section also becomes the in-app notes), commit, then `git tag v1.2.1 && git push --tags`. `.github/workflows/release.yml` builds Windows (`windows-latest`) and Mac (`macos-15`), self-tests each build (`--selftest`), and a publish job writes `latest.json` and creates the GitHub release. *Run workflow* on its own builds and tests both without publishing.
 
 ## Windows
 
