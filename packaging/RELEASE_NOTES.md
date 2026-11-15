@@ -1,6 +1,12 @@
-## PTZ Tracker 1.3.0
+## PTZ Tracker 1.4.0
 
 ### What's new
+- **Separate speed sliders for Pan / tilt and Zoom.** The Manual panel now has two sliders instead of the 1-5 speed buttons, so you can set pan/tilt and zoom speed on their own, to any value you like.
+- **Z and C still work.** They (and the speed buttons on the phone remote) move both sliders to the next of five speed stops: Crawl, Slow, Medium, Fast, Max. You can change each stop in *Settings → Shortcuts*.
+- **Save button in Settings.** *Save* keeps your changes without closing the window. *Done* still saves and closes.
+- **Key layouts.** In *Settings → Shortcuts → Key layouts* you can save your current keys under a name (like "Church" or "Laptop"), switch between saved layouts, and delete ones you don't need.
+
+### In 1.3.0
 - **Control the camera from a tablet or phone.** While PTZ Tracker is open on the PC, an iPad, Android tablet or phone on the same Wi-Fi can run it from the browser. There's nothing to install. Turn it on in *Settings → Remote*, then scan the QR code (or type the address and the 4-digit PIN). Use *Add to Home Screen* to open it like an app.
 - The remote has a live preview (tap a head to follow it, drag to move the camera), start/stop tracking, Release, Auto-pick, Stage shot, presets 1–20, a joystick, zoom, focus, the five speed levels and Stop camera. On a phone, Move and Presets are two tabs.
 - **Safe by design.** Remote control is off until you turn it on, works only on your own network, and each device pairs once with the PIN. *New PIN* changes the PIN; *Forget all paired devices* unpairs every device. If the tablet drops off Wi-Fi, locks or switches apps while you hold the joystick or zoom, the camera stops within a third of a second.

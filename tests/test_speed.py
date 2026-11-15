@@ -40,6 +40,15 @@ def main():
     check("a saved speed_level wins over manual_speed", motion.migrate_speed({"manual_speed": 0.05, "speed_level": 5})["speed_level"] == 5)
     check("fresh config starts at Medium", motion.migrate_speed({})["speed_level"] == 3)
     check("out-of-range level is clamped", motion.migrate_speed({"speed_level": 9})["speed_level"] == 5)
+    c = motion.migrate_speed({"speed_level": 4})
+    check("configs from before the sliders start at their level's speeds", c["pan_speed"] == 0.35 and c["zoom_speed"] == 0.6, c)
+    c = motion.migrate_speed({"speed_level": 4, "pan_speed": 0.22, "zoom_speed": 5})
+    check("saved slider speeds are kept, and clamped", c["pan_speed"] == 0.22 and c["zoom_speed"] == 1.0, c)
+    check("broken slider speeds fall back to the level", motion.migrate_speed({"pan_speed": "x", "zoom_speed": True})["pan_speed"] == 0.18)
+    L = motion.DEFAULT_LEVELS
+    check("Slower / Faster jump to the next stop from between two", motion.step_level(0.25, L, -1) == 3 and motion.step_level(0.25, L, 1) == 4)
+    check("... and from on a stop", motion.step_level(0.18, L, -1) == 2 and motion.step_level(0.18, L, 1) == 4)
+    check("... and stop at the ends", motion.step_level(0.01, L, -1) == 1 and motion.step_level(1.0, L, 1) == 5)
     check("broken speed_levels are repaired", motion.clean_levels([{"pan": "x"}, 5])[0] == motion.DEFAULT_LEVELS[0] and len(motion.clean_levels(None)) == 5)
 
     # ramp
@@ -85,6 +94,7 @@ def main():
 
 
 def window_checks():
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
     from ptztracker import app as appmod
@@ -115,14 +125,14 @@ def window_checks():
             app.processEvents()
             time.sleep(0.01)
 
-    check("window starts at Medium", w.speed_level == 3 and w.seg[2].isChecked())
+    check("window starts at Medium", w.speed_level == 3 and w.pan_slider.slider.value() == 18 and w.zoom_slider.slider.value() == 40)
     w.set_speed_level(2)
-    w.set_speed_level(w.speed_level - 1)
-    w.set_speed_level(w.speed_level - 1)
-    check("slower never goes under 1 (no wraparound)", w.speed_level == 1 and w.seg[0].isChecked())
+    w.step_speed(-1)
+    w.step_speed(-1)
+    check("slower never goes under 1 (no wraparound)", w.speed_level == 1 and w.pan_slider.slider.value() == 3)
     for _ in range(9):
-        w.set_speed_level(w.speed_level + 1)
-    check("faster stops at 5", w.speed_level == 5)
+        w.step_speed(1)
+    check("faster stops at 5", w.speed_level == 5 and w.pan_speed == 0.7 and w.zoom_speed == 1.0)
     check("toast text appears on the video", w.view._toast[0] == "Speed 5 · Max", w.view._toast)
 
     w.set_speed_level(3)
@@ -179,7 +189,31 @@ def window_checks():
     w.poller = None
     w.zoom_press(1)
     check("zoom uses the level's zoom speed", abs(w.cam.z - 0.4) < 1e-9, w.cam.z)
+    w.zoom_slider.slider.setValue(77)  # dragging the zoom slider
+    check("the zoom slider changes a zoom in progress, not pan/tilt", abs(w.cam.z - 0.77) < 1e-9 and w.pan_speed == 0.18 and w.cfg["zoom_speed"] == 0.77, (w.cam.z, w.pan_speed))
     w.zoom_release()
+    w.pan_slider.slider.setValue(25)  # dragging the pan/tilt slider
+    w.manual_press("k", 1, 0)
+    pump(0.5)
+    check("the pan/tilt slider sets the move speed, not the zoom", abs(w.cam.pt[0] - 0.25) < 1e-6 and w.zoom_speed == 0.77 and w.cfg["pan_speed"] == 0.25, w.cam.pt)
+    w.manual_release("k")
+    pump(0.4)
+    w.step_speed(1)
+    check("Faster from between two stops goes to the next one up", w.speed_level == 4 and w.pan_speed == 0.35 and w.zoom_speed == 0.6)
+
+    # key layouts
+    w.binds.assign("home", 0, int(Qt.Key_J))
+    w._binds_changed()
+    w.cfg["key_layouts"]["Ana"] = w.binds.to_cfg()
+    w._restore_keys()
+    check("a saved layout is listed but not selected after going back to defaults", w.layouts_combo.findText("Ana") > 0 and w.layouts_combo.currentIndex() == 0)
+    w._layout_chosen(w.layouts_combo.findText("Ana"))
+    check("choosing a layout loads its keys and shows it selected", w.binds.keys["home"][0] == int(Qt.Key_J) and w.layouts_combo.currentText() == "Ana")
+    w._layout_delete()
+    check("deleting a layout keeps the keys in use", "Ana" not in w.cfg["key_layouts"] and w.binds.keys["home"][0] == int(Qt.Key_J))
+    w._save_clicked()
+    saved = appmod.load_config()
+    check("Save writes the speeds and keys without closing Settings", saved["pan_speed"] == 0.35 and saved["keys"]["home"][0] == "J" and w.save_btn.text().startswith("Saved"))
     w.worker.stop()
 
 

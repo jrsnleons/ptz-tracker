@@ -65,6 +65,7 @@ DEFAULT_CONFIG = {
     "visca_raw": False,
     "zoom_scaled_speed": True,  # slow pan/tilt down when zoomed in
     "keys": {},  # action -> [keys]; missing actions use keys.DEFAULTS
+    "key_layouts": {},  # name -> saved "keys" dict
     "preset_names": {},  # "3": "Pulpit"
     "picture": {},  # camera -> last picture values sent
     "looks": {},  # name -> picture values
@@ -1104,9 +1105,13 @@ class MainWindow(QMainWindow):
         self.zoom_held = 0
         self.store_mode = False
         self.binds = keys.Binds(self.cfg.get("keys"))
+        if not isinstance(self.cfg.get("key_layouts"), dict):
+            self.cfg["key_layouts"] = {}
         self._relabels = []  # callables that rewrite key hints on buttons after a bind change
-        self.speed_level = self.cfg["speed_level"]
+        self.speed_level = self.cfg["speed_level"]  # nearest stop to the pan/tilt slider; what Z / C and the remote see
         self.levels = self.cfg["speed_levels"]
+        self.pan_speed = self.cfg["pan_speed"]
+        self.zoom_speed = self.cfg["zoom_speed"]
         self.ramp = motion.Ramp()
         self._ramp_t = 0.0
         self._sent_pt = (0.0, 0.0)
@@ -1194,7 +1199,7 @@ class MainWindow(QMainWindow):
 
         self._set_connected(False)
         self.set_tracking(False)
-        self.set_speed_level(self.speed_level, toast=False)
+        self.set_speeds(self.pan_speed, self.zoom_speed)
         self._relabel_all()
         self.status_timer = QTimer(self, interval=1000, timeout=self._refresh_status)
         self.status_timer.start()
@@ -1629,6 +1634,7 @@ class MainWindow(QMainWindow):
     def _binds_changed(self, notes=None):
         self._relabel_all()
         self._refresh_key_rows(notes)
+        self._layout_refresh()
         self._refresh_presets()
         self._save()
 
@@ -1789,21 +1795,18 @@ class MainWindow(QMainWindow):
         top.addLayout(side, 1)
         v.addLayout(top)
 
-        row = QHBoxLayout()
-        row.setSpacing(4)
-        row.addWidget(label("Speed", "muted"))
-        row.addSpacing(6)
-        self.seg = []
-        for i, name in enumerate(motion.LEVEL_NAMES):
-            b = nofocus(QPushButton(str(i + 1)))
-            b.setObjectName("seg")
-            b.setCheckable(True)
-            b.setFixedHeight(28)
-            b.setToolTip(f"{i + 1} · {name}")
-            b.clicked.connect(lambda _=False, n=i + 1: self.set_speed_level(n, toast=False))
-            row.addWidget(b, 1)
-            self.seg.append(b)
-        v.addLayout(row)
+        speeds = QGridLayout()
+        speeds.setHorizontalSpacing(8)
+        speeds.setVerticalSpacing(2)
+        self.pan_slider = slider(0.01, 1.0, self.pan_speed, lambda x: self.set_speeds(pan=x))
+        self.zoom_slider = slider(0.01, 1.0, self.zoom_speed, lambda x: self.set_speeds(zoom=x))
+        self.pan_slider.setToolTip("How fast the arrows and the pad pan and tilt")
+        self.zoom_slider.setToolTip("How fast the zoom buttons and keys zoom")
+        for r, (text, row) in enumerate((("Pan / tilt", self.pan_slider), ("Zoom", self.zoom_slider))):
+            speeds.addWidget(label(text, "muted"), r, 0)
+            speeds.addWidget(row, r, 1)
+        speeds.setColumnStretch(1, 1)
+        v.addLayout(speeds)
         self.speed_hint = label("", "hint")
         v.addWidget(self.speed_hint)
 
@@ -1832,21 +1835,30 @@ class MainWindow(QMainWindow):
         self._manual_reset()
         self.cam.home()
 
-    def set_speed_level(self, n, toast=True):
-        n = min(max(int(n), 1), len(motion.LEVEL_NAMES))
-        self.speed_level = self.cfg["speed_level"] = n
-        for i, b in enumerate(self.seg):
-            b.setChecked(i + 1 == n)
-        if toast:
-            self.view.toast(f"Speed {n} · {motion.LEVEL_NAMES[n - 1]}")
+    def set_speeds(self, pan=None, zoom=None, level=None):
+        """Sets the pan/tilt and / or zoom speed (0.01-1), moves the sliders, and applies it to a move in progress."""
+        if pan is not None:
+            self.pan_speed = self.cfg["pan_speed"] = motion.clean_speed(pan)
+            self.pan_slider.set(self.pan_speed)
+        if zoom is not None:
+            self.zoom_speed = self.cfg["zoom_speed"] = motion.clean_speed(zoom)
+            self.zoom_slider.set(self.zoom_speed)
+        self.speed_level = self.cfg["speed_level"] = level or motion.nearest_level(self.pan_speed, self.levels)
         if self.zoom_held:
-            self.cam.zoom(self.zoom_held * self._level()["zoom"])
+            self.cam.zoom(self.zoom_held * self.zoom_speed)
         if self.held or self.ramp.active:
             self._start_manual()
         self.remote.push_state()
 
-    def _level(self):
-        return self.levels[self.speed_level - 1]
+    def set_speed_level(self, n, toast=True):
+        """Jumps both sliders to one of the five speed stops (the remote, and the Slower / Faster keys)."""
+        n = min(max(int(n), 1), len(motion.LEVEL_NAMES))
+        self.set_speeds(self.levels[n - 1]["pan"], self.levels[n - 1]["zoom"], level=n)
+        if toast:
+            self.view.toast(f"Speed {n} · {motion.LEVEL_NAMES[n - 1]}")
+
+    def step_speed(self, direction):
+        self.set_speed_level(motion.step_level(self.pan_speed, self.levels, direction))
 
     def _zoom_scale(self):
         pos = self.poller.latest() if self.poller else None
@@ -1858,7 +1870,7 @@ class MainWindow(QMainWindow):
     def _manual_target(self):
         """Pan/tilt the held keys ask for right now: direction, speed level, diagonal and zoom scaling."""
         x, y = motion.normalise(sum(p for p, _ in self.held.values()), sum(t for _, t in self.held.values()))
-        speed = self._level()["pan"] * self._zoom_scale()
+        speed = self.pan_speed * self._zoom_scale()
         return x * speed, y * speed
 
     def _start_manual(self):
@@ -1905,7 +1917,7 @@ class MainWindow(QMainWindow):
     def zoom_press(self, direction):
         self.zoom_held = direction
         self.worker.manual_active = True
-        self.cam.zoom(direction * self._level()["zoom"])
+        self.cam.zoom(direction * self.zoom_speed)
 
     def zoom_release(self):
         self.zoom_held = 0
@@ -1944,11 +1956,25 @@ class MainWindow(QMainWindow):
         done.setFixedWidth(120)
         done.clicked.connect(dlg.accept)
         dlg.accepted.connect(self._save)
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setFixedWidth(120)
+        self.save_btn.setToolTip("Save now and keep Settings open")
+        self.save_btn.clicked.connect(self._save_clicked)
         row = QHBoxLayout()
         row.addStretch(1)
+        row.addWidget(self.save_btn)
         row.addWidget(done)
         v.addLayout(row)
         return dlg
+
+    def _save_clicked(self):
+        try:
+            self._save()
+        except OSError as e:
+            QMessageBox.warning(self.settings_dialog, "Could not save", str(e))
+            return
+        self.save_btn.setText("Saved ✓")
+        QTimer.singleShot(1500, lambda: self.save_btn.setText("Save"))
 
     def open_settings(self, tab=None):
         if tab is not None:
@@ -2078,6 +2104,21 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(4, 16, 4, 4)
         v.setSpacing(6)
         v.addWidget(label("Click a key, then press the new one. Esc cancels, Backspace clears. Pressing a key that is already used moves it here.", "hint", wrap=True))
+        layouts = QHBoxLayout()
+        layouts.addWidget(label("Key layouts", "section"))
+        self.layouts_combo = QComboBox()
+        self.layouts_combo.setMinimumWidth(180)
+        self.layouts_combo.activated.connect(self._layout_chosen)
+        save = QPushButton("Save layout…")
+        save.clicked.connect(self._layout_save)
+        delete = QPushButton("Delete")
+        delete.clicked.connect(self._layout_delete)
+        layouts.addWidget(self.layouts_combo, 1)
+        layouts.addWidget(save)
+        layouts.addWidget(delete)
+        v.addSpacing(4)
+        v.addLayout(layouts)
+        v.addWidget(label("Save the keys below under a name (one per operator, say) and switch between them here.", "hint", wrap=True))
         self.key_rows = {}
         groups = (("Held while pressed", keys.HELD), ("Pressed once", keys.PRESS))
         for title, kind in groups:
@@ -2103,8 +2144,8 @@ class MainWindow(QMainWindow):
         v.addWidget(restore, 0, Qt.AlignLeft)
 
         v.addSpacing(12)
-        v.addWidget(label("Speed levels", "section"))
-        v.addWidget(label("Z and C step through these. Pan/tilt and zoom speed for each level, 0–1 of the camera's top speed.", "hint", wrap=True))
+        v.addWidget(label("Speed stops", "section"))
+        v.addWidget(label("The Slower / Faster keys and the remote jump both speed sliders to these. Pan/tilt and zoom speed for each stop, 0–1 of the camera's top speed.", "hint", wrap=True))
         grid = QGridLayout()
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(4)
@@ -2123,6 +2164,7 @@ class MainWindow(QMainWindow):
         v.addWidget(setting("Zoom-aware speed", "Keeps the picture moving at about the same rate at full zoom. Needs the Camera IP so the app can read the zoom.", self.zoom_scale_check))
         v.addStretch(1)
         self._refresh_key_rows()
+        self._layout_refresh()
         scroll = QScrollArea()
         scroll.setWidget(w)
         scroll.setWidgetResizable(True)
@@ -2178,6 +2220,40 @@ class MainWindow(QMainWindow):
     def _restore_keys(self):
         self.binds.reset_all()
         self._binds_changed()
+
+    def _layout_refresh(self):
+        """Lists the saved layouts and shows the one the current keys match, if any."""
+        saved = {n: k for n, k in self.cfg["key_layouts"].items() if isinstance(k, dict)}
+        now = self.binds.to_cfg()
+        self.layouts_combo.clear()
+        self.layouts_combo.addItem("Choose a layout…")
+        self.layouts_combo.addItems(sorted(saved))
+        match = next((n for n in sorted(saved) if keys.Binds(saved[n]).to_cfg() == now), "")
+        if match:
+            self.layouts_combo.setCurrentText(match)
+
+    def _layout_chosen(self, index):
+        name = self.layouts_combo.itemText(index)
+        if index <= 0 or not isinstance(self.cfg["key_layouts"].get(name), dict):
+            return
+        self.binds.load(self.cfg["key_layouts"][name])
+        self._binds_changed()
+        self.statusBar().showMessage(f"Key layout: {name}")
+
+    def _layout_save(self):
+        current = self.layouts_combo.currentText() if self.layouts_combo.currentIndex() > 0 else ""
+        name, ok = QInputDialog.getText(self.settings_dialog, "Save key layout", "Name for these keys (e.g. your name)", text=current)
+        name = name.strip()[:40]
+        if ok and name:
+            self.cfg["key_layouts"][name] = self.binds.to_cfg()
+            self._layout_refresh()
+            self._save()
+
+    def _layout_delete(self):
+        name = self.layouts_combo.currentText()
+        if self.layouts_combo.currentIndex() > 0 and self.cfg["key_layouts"].pop(name, None) is not None:
+            self._layout_refresh()
+            self._save()
 
     # ---------------- picture tab
     def _picture_tab(self):
@@ -2588,8 +2664,8 @@ class MainWindow(QMainWindow):
             "home": self.camera_home,
             "stage_shot": self.go_stage_home,
             "focus_once": lambda: self.cam.one_push_af(),
-            "speed_down": lambda: self.set_speed_level(self.speed_level - 1),
-            "speed_up": lambda: self.set_speed_level(self.speed_level + 1),
+            "speed_down": lambda: self.step_speed(-1),
+            "speed_up": lambda: self.step_speed(1),
             "bank": self.toggle_bank,
         }
 

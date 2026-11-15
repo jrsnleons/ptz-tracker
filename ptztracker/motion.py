@@ -42,7 +42,23 @@ def migrate_speed(cfg):
         level = nearest_level(float(old), cfg["speed_levels"]) if isinstance(old, (int, float)) else DEFAULT_LEVEL
     cfg["speed_level"] = min(max(level, 1), len(LEVEL_NAMES))
     cfg.pop("manual_speed", None)
+    at = cfg["speed_levels"][cfg["speed_level"] - 1]  # configs from before the sliders start at their level's speeds
+    cfg["pan_speed"] = _num(cfg.get("pan_speed"), at["pan"])
+    cfg["zoom_speed"] = _num(cfg.get("zoom_speed"), at["zoom"])
     return cfg
+
+
+def clean_speed(v):
+    """A slider speed, kept inside 0.01..1."""
+    return _num(v, 0.01)
+
+
+def step_level(speed, levels, direction):
+    """1-based level the Slower / Faster keys jump to from a pan speed: the next stop below or above it."""
+    pans = [d["pan"] for d in levels]
+    if direction < 0:
+        return max([i + 1 for i, p in enumerate(pans) if p < speed - 1e-6], default=1)
+    return min([i + 1 for i, p in enumerate(pans) if p > speed + 1e-6], default=len(pans))
 
 
 def normalise(x, y):

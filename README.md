@@ -73,8 +73,11 @@ Every key can be changed in *Settings → Shortcuts* (click a key, press the new
 
 `⌘,` / `Ctrl+,` opens Settings and isn't rebindable. Keys are saved as `"keys"` in the config; missing entries fall back to the defaults, so old configs keep working.
 
-### Speed levels
-Five levels replace the old Manual speed slider: Crawl, Slow, Medium, Fast, Max. `Z` / `C` step down / up (no wraparound), a toast on the video confirms it, and the Manual panel shows them as 1–5 buttons. Pan/tilt and zoom speed per level are editable in *Settings → Shortcuts*. Old configs with a `manual_speed` get the nearest level. Manual pan/tilt eases in (~0.25 s) and out (~0.15 s), diagonals are normalised, and with the Camera IP set the speed scales with the zoom (*Slow down pan/tilt when zoomed in*). Tracking is not affected; Stop camera is instant.
+### Speed
+The Manual panel has two sliders, *Pan / tilt* and *Zoom*, so the two speeds are set separately and to any value. `Z` / `C` jump both sliders to the next of five stops (Crawl, Slow, Medium, Fast, Max; no wraparound) with a toast on the video; the remote's speed buttons use the same stops. The stops are editable in *Settings → Shortcuts*. Old configs start at their saved level's speeds. Manual pan/tilt eases in (~0.25 s) and out (~0.15 s), diagonals are normalised, and with the Camera IP set the speed scales with the zoom (*Slow down pan/tilt when zoomed in*). Tracking is not affected; Stop camera is instant.
+
+### Key layouts and Save
+*Settings → Shortcuts → Key layouts* saves the current keys under a name and switches between saved sets. *Save* at the bottom of Settings writes everything to disk without closing the window; *Done* saves and closes.
 
 ### Presets
 20 slots in a 5 × 4 grid. The number keys recall 1–10; `B` switches them to 11–20 (the grid dims the other bank). `Shift` + a number stores. Right-click a slot to rename it (names are saved as `"preset_names"`). The stage-shot preset is marked *Stage* and asks before it is overwritten.
