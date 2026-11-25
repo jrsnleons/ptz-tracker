@@ -23,11 +23,13 @@ ACTIONS = [
     ("release", "Release target", PRESS, ["Esc"]),
     ("stop", "Stop camera", PRESS, ["X"]),
     ("home", "Camera home", PRESS, ["H"]),
-    ("stage_shot", "Go to stage shot", PRESS, ["G"]),
-    ("focus_once", "Focus once", PRESS, ["F"]),
-    ("speed_down", "Slower", PRESS, ["Z"]),
-    ("speed_up", "Faster", PRESS, ["C"]),
-    ("bank", "Next preset bank", PRESS, ["B"]),
+    ("stage_shot", "Go to stage shot", PRESS, []),
+    ("focus_once", "Focus once", PRESS, []),
+    ("pan_slower", "Pan / tilt slower", PRESS, ["V"]),
+    ("pan_faster", "Pan / tilt faster", PRESS, ["B"]),
+    ("zoom_slower", "Zoom slower", PRESS, ["F"]),
+    ("zoom_faster", "Zoom faster", PRESS, ["G"]),
+    ("bank", "Next preset bank", PRESS, []),
 ] + [(f"preset_{i}", f"Recall preset {i}", PRESS, [str((i % 10))]) for i in range(1, 11)]  # fmt: skip
 
 LABELS = {a: label for a, label, _, _ in ACTIONS}
@@ -64,6 +66,17 @@ def pretty(code):
     return PRETTY.get(t, t)
 
 
+# Before 1.5 one pair of keys (Z / C) set both speeds, and F / G / B did focus once, stage shot and bank. Those old
+# defaults are dropped from saved binds so the new speed keys can have them; keys the user chose themselves stay.
+OLD_DEFAULTS = {"speed_down": ["Z"], "speed_up": ["C"], "focus_once": ["F"], "stage_shot": ["G"], "bank": ["B"]}
+
+
+def migrate(saved):
+    if not isinstance(saved, dict) or not ({"speed_down", "speed_up"} & set(saved)):
+        return saved
+    return {a: v for a, v in saved.items() if a not in ("speed_down", "speed_up") and OLD_DEFAULTS.get(a) != v}
+
+
 class Binds:
     """action id -> up to SLOTS key codes (0 = empty slot). No key is ever bound to two actions."""
 
@@ -79,7 +92,7 @@ class Binds:
     def load(self, cfg_keys):
         """Merge a saved dict over the defaults. Actions missing from it (new in this version) get their default
         keys, unless a saved bind already uses that key."""
-        saved = cfg_keys if isinstance(cfg_keys, dict) else {}
+        saved = migrate(cfg_keys) if isinstance(cfg_keys, dict) else {}
         self.keys, used = {}, set()
         for action in DEFAULTS:
             if action in saved and isinstance(saved[action], list):

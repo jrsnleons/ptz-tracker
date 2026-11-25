@@ -163,13 +163,15 @@ def main():
     picture.send_all(v3, picture.clean({"exposure": "manual", "wb": "manual", "sharpness": 0.0}))
     check("a look sends modes, then their values", [p[3] for p in s3.sent] == [0x39, 0x4B, 0x4C, 0x4A, 0x35, 0x43, 0x44, 0x42], [hex(p[3]) for p in s3.sent])
 
-    # Canon HTTP: parsing and finding items (no network)
-    text = "c.1.pan:=100\nc.1.picture.contrast:=3\nc.1.picture.contrast.max:=10\nc.1.sharpness:=2\nc.1.color.saturation:=0\nx:=y\n"
-    d = picture.CanonPicture.parse(text)
-    items = picture.CanonPicture.find_items(d)
-    check("info.cgi lines parse", d["c.1.pan"] == "100" and len(d) == 6)
-    check("contrast / sharpness / saturation items are found, helper keys skipped", items == {"contrast": "c.1.picture.contrast", "sharpness": "c.1.sharpness", "saturation": "c.1.color.saturation"}, items)
-    check("no matching items -> nothing to show", picture.CanonPicture.find_items({"c.1.pan": "1"}) == {})
+    # Canon API picture panel: only what the camera reports, as a list or a range
+    from ptztracker.picture_panel import available
+
+    info = {"c.1.wb": "auto", "c.1.wb.list": "auto,daylight,tungsten,kelvin", "c.1.me.brightness": "0",
+            "c.1.me.brightness.min": "-12", "c.1.me.brightness.max": "12", "c.1.ac": "3", "c.1.pan": "100"}  # fmt: skip
+    a = available(info)
+    check("lists become choices, ranges become sliders", a == {"me.brightness": ("range", -12, 12), "wb": ("list", ["auto", "daylight", "tungsten", "kelvin"])}, a)
+    check("a value with no list or range is left out", "ac" not in a)
+    check("nothing reported -> nothing shown", available({}) == {})
 
     window_checks()
     print("all passed" if ok else "SOME FAILED")

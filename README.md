@@ -43,9 +43,9 @@ The first time it connects, macOS will ask to allow **Local Network** access. Cl
 | Setting | Value |
 |---|---|
 | Video | NDI → `LWNRA-PTZ_CAM (Channel 1)` (press ↻ to refresh) |
-| Control | **NDI PTZ** (uses the same NDI link, as the Windows app did), or **VISCA over IP** → camera IP `192.168.254.122`, port `52381` |
+| Control | **Canon API** (the camera's own web API, the same one Canon's Remote Camera Control Application uses) → camera IP `192.168.254.122`, plus the camera's web login in *Settings → Camera* if it asks for one. Or **NDI PTZ** (uses the same NDI link), or **VISCA over IP** (port `52381`). |
 
-VISCA over IP must be turned on in the camera's web settings. If it doesn't respond, try ticking "Raw VISCA". If the camera's DHCP address changes, update the IP. RTSP and webcams also work as video inputs, but RTSP adds latency, so NDI is better for tracking.
+The Camera IP is used whatever the control choice: it reads the position (stage boundary), the presets and the picture settings. VISCA over IP must be turned on in the camera's web settings. If it doesn't respond, try ticking "Raw VISCA". If the camera's DHCP address changes, update the IP. RTSP and webcams also work as video inputs, but RTSP adds latency, so NDI is better for tracking. The Canon API path was built from Canon's app and is not yet checked on the church CR-N300: run `python -m tests.canon_probe 192.168.254.122 > canon-probe.txt` there first (it moves nothing).
 
 ## Using it
 
@@ -66,24 +66,26 @@ Every key can be changed in *Settings → Shortcuts* (click a key, press the new
 |---|---|
 | Pan left `A` `←` · right `D` `→` | Start/stop tracking `Space` |
 | Tilt up `W` `↑` · down `S` `↓` | Release target `Esc` · Stop camera `X` |
-| Zoom in `E` `+` · out `Q` `-` | Home `H` · Go to stage shot `G` |
-| Focus near `[` · far `]` | Focus once `F` |
-| | Slower `Z` · Faster `C` · Next preset bank `B` |
+| Zoom in `E` `+` · out `Q` `-` | Home `H` |
+| Focus near `[` · far `]` | Pan/tilt speed slower `V` · faster `B` |
+| | Zoom speed slower `F` · faster `G` |
 | | Recall preset `1`–`9`, `0` · store with `Shift` + the key |
 
-`⌘,` / `Ctrl+,` opens Settings and isn't rebindable. Keys are saved as `"keys"` in the config; missing entries fall back to the defaults, so old configs keep working.
+`⌘,` / `Ctrl+,` opens Settings and isn't rebindable. Keys are saved as `"keys"` in the config; missing entries fall back to the defaults, so old configs keep working. Go to stage shot, Focus once and Next preset bank have no key by default (set one in Settings → Shortcuts). Binds from 1.4 lose their old F / G / B / Z / C defaults so the new speed keys can have them; keys you chose yourself are kept.
 
 ### Speed
-The Manual panel has two sliders, *Pan / tilt* and *Zoom*, so the two speeds are set separately and to any value. `Z` / `C` jump both sliders to the next of five stops (Crawl, Slow, Medium, Fast, Max; no wraparound) with a toast on the video; the remote's speed buttons use the same stops. The stops are editable in *Settings → Shortcuts*. Old configs start at their saved level's speeds. Manual pan/tilt eases in (~0.25 s) and out (~0.15 s), diagonals are normalised, and with the Camera IP set the speed scales with the zoom (*Slow down pan/tilt when zoomed in*). Tracking is not affected; Stop camera is instant.
+The Manual panel has two sliders, as in Canon's camera app: *Pan / tilt* in 16 steps (default 8) and *Zoom* from 1 to 100 %. Over the Canon API they send exactly what Canon's app sends for the same numbers. `V` / `B` move pan/tilt one step down / up and `F` / `G` move zoom 10 % down / up (no wraparound), with a toast on the video; the remote has *Slower* / *Faster*. Configs from 1.4 start at the nearest step. Manual pan/tilt eases in (~0.25 s) and out (~0.15 s), and diagonals are normalised. *Slow down pan/tilt when zoomed in* is Canon's zoom-linked speed: over the Canon API the camera does it, otherwise the app does it from the position readout. Tracking is not affected; Stop camera is instant.
 
 ### Key layouts and Save
 *Settings → Shortcuts → Key layouts* saves the current keys under a name and switches between saved sets. *Save* at the bottom of Settings writes everything to disk without closing the window; *Done* saves and closes.
 
 ### Presets
-20 slots in a 5 × 4 grid. The number keys recall 1–10; `B` switches them to 11–20 (the grid dims the other bank). `Shift` + a number stores. Right-click a slot to rename it (names are saved as `"preset_names"`). The stage-shot preset is marked *Stage* and asks before it is overwritten.
+20 slots in a 5 × 4 grid. The number keys recall 1–10; `B` switches them to 11–20 (the grid dims the other bank). `Shift` + a number stores. With the Camera IP set the grid shows the camera's own preset names; right-click a slot to give it a name here instead (saved as `"preset_names"`). Over the Canon API, right-click → *Recall speed…* sets a speed for that preset (camera units, saved as `"preset_speeds"`, and sent with it when you store); without one, the camera recalls at the speed it saved with the preset. The stage-shot preset is marked *Stage* and asks before it is overwritten.
 
 ### Picture settings
-*Settings → Picture*: exposure (auto with brightness, or manual iris / gain / shutter) and white balance (auto, indoor, outdoor, once, manual with red/blue), sent live while you drag (throttled to one update per 100 ms). *Save look…* stores a named set of values; *Reset camera to auto* returns exposure and white balance to auto. The church setup uses **NDI PTZ**, which carries exposure and white balance but has no contrast, sharpness or saturation; VISCA adds sharpness (Aperture). With the Camera IP set, the app also reads the camera's `info.cgi` list on connect, writes it to `app.log`, and shows Contrast / Sharpness / Saturation sliders only if the camera has matching items. That part is untested on the real CR-N300. NDI and VISCA can't read the picture back, so sliders start from the last values sent (saved per camera in `"picture"`; looks in `"looks"`).
+With the Camera IP set, the **Picture** section on the main window shows the camera's own picture settings (exposure, AE level, iris, gain, shutter, ND, white balance and colour temperature, sharpness, black level, knee: whichever the camera reports), starting from its current values and following changes made elsewhere. Changes go out live; *Save camera settings* asks the camera to keep them. *Hide* folds it away. The value scales come from Canon's app and are unconfirmed on the CR-N300.
+
+*Settings → Picture* is for NDI PTZ and VISCA, which can't read the picture back: exposure (auto with brightness, or manual iris / gain / shutter) and white balance (auto, indoor, outdoor, once, manual with red/blue), sent live while you drag (throttled to one update per 100 ms). *Save look…* stores a named set of values; *Reset camera to auto* returns exposure and white balance to auto. Sliders start from the last values sent (saved per camera in `"picture"`; looks in `"looks"`).
 
 ### Stage boundary (return to the stage shot)
 1. Connect with **Camera IP** filled in. The app reads the camera's pan/tilt/zoom from the CR-N300's web API.
@@ -96,13 +98,15 @@ On the way back the app recalls the preset and checks the position readout to co
 ### Tests
 Run from the repo root (use the venv's Python; add `QT_QPA_PLATFORM=offscreen` on a machine without a display):
 - `python -m tests.test_keys` key binds: defaults, round trip, conflicts, old configs, Shift+digit store, preset banks.
-- `python -m tests.test_speed` speed levels and migration, ramp, diagonals, zoom scaling, and the window's manual move loop.
-- `python -m tests.test_presets` key handling in the window: banks, names, the stage slot, rebinding.
+- `python -m tests.test_speed` speed steps and migration, ramp, diagonals, zoom scaling, and the window's manual move loop.
+- `python -m tests.test_canon_http` the Canon API client against a fake camera: session, newest-write-wins, Canon's speed maths, preset recall / store, picture writes.
+- `python -m tests.test_presets` key handling in the window: banks, names, the stage slot, rebinding, camera preset names and per-preset speed.
 - `python -m tests.test_picture` VISCA picture bytes through a fake socket, NDI calls on a fake receiver, throttling, looks.
 - `python -m tests.test_updater` version compare, `latest.json`, asset pick, SHA-256 (no network).
 - `python -m tests.test_homing` runs a simulated camera, no hardware needed.
 - `python -m tests.test_worker` checks the worker with fake video: stall stop, homing without video, GUI frame dropping.
 - Every second the app writes fps and timings to `~/Library/Logs/PTZ Tracker/perf.log` (also shown in the video HUD).
+- `python -m tests.canon_probe <camera IP> [user password]` reads the real camera's web API (info list, session open/close) and moves nothing.
 - `python -m tests.camera_stage_test` uses the real camera on the church network. It moves the camera and stores preset 10, then puts the camera back where it started.
 
 ### Editing the stage and the return trip

@@ -68,8 +68,10 @@ def main():
     key(Qt.Key_At, shift=True)
     check("Shift+2 (arrives as @) stores preset 2", w.cam.log[-1] == ("store", 2), w.cam.log)
 
-    key(Qt.Key_B)
-    check("B switches to bank 2 and the hint says 11-20", w.bank == 1 and "11–20" in w.bank_hint.text(), w.bank_hint.text())
+    w.binds.assign("bank", 0, keys.key_code("N"))  # bank has no key by default
+    w._binds_changed()
+    key(Qt.Key_N)
+    check("the bank key switches to bank 2 and the hint says 11-20", w.bank == 1 and "11–20" in w.bank_hint.text(), w.bank_hint.text())
     key(Qt.Key_3)
     check("bank 2: key 3 recalls preset 13", w.cam.log[-1] == ("recall", 13))
     key(Qt.Key_0)
@@ -77,8 +79,8 @@ def main():
     key(Qt.Key_Exclam, shift=True)
     check("bank 2: Shift+1 stores preset 11", w.cam.log[-1] == ("store", 11))
     check("bank 2 slots are lit, bank 1 dimmed", "color" not in w.preset_btns[12].styleSheet() and "color" in w.preset_btns[2].styleSheet())
-    key(Qt.Key_B)
-    check("B again goes back to bank 1", w.bank == 0 and "1–10" in w.bank_hint.text())
+    key(Qt.Key_N)
+    check("pressing it again goes back to bank 1", w.bank == 0 and "1–10" in w.bank_hint.text())
 
     # names
     w._set_preset_name(3, "Pulpit")
@@ -101,8 +103,7 @@ def main():
 
     # other keys come from the binds
     key(Qt.Key_H)
-    key(Qt.Key_F)
-    check("H and F still act", ("home",) in w.cam.log and ("af",) in w.cam.log)
+    check("H still acts", ("home",) in w.cam.log)
     key(Qt.Key_E)
     key(Qt.Key_E, press=False)
     check("E zooms in and releasing stops", w.cam.log[-2][0] == "zoom" and w.cam.log[-2][1] > 0 and w.cam.log[-1] == ("zoom", 0), w.cam.log[-2:])
@@ -111,22 +112,59 @@ def main():
     w.binds.assign("focus_once", 0, keys.key_code("J"))
     w._binds_changed()
     n = len(w.cam.log)
-    key(Qt.Key_F)
     key(Qt.Key_J)
-    check("rebound key works, the old one does not", w.cam.log[n:] == [("af",)], w.cam.log[n:])
+    check("a key bound to focus once works", w.cam.log[n:] == [("af",)], w.cam.log[n:])
     from PySide6.QtWidgets import QPushButton
 
     once = [b for b in w.rail.findChildren(QPushButton) if b.text().startswith("Once")]
     check("button labels follow the binds", once and once[0].text().endswith("J"), [b.text() for b in once])
-    key(Qt.Key_Z)
-    check("Z lowers the speed level", w.speed_level == 2)
-    key(Qt.Key_C)
-    key(Qt.Key_C)
-    check("C raises it", w.speed_level == 4)
+    step, zoom = w.pt_step, w.zoom_speed
+    key(Qt.Key_V)
+    check("V lowers the pan/tilt step, not zoom", w.pt_step == step - 1 and w.zoom_speed == zoom)
+    key(Qt.Key_B)
+    key(Qt.Key_B)
+    check("B raises it", w.pt_step == step + 1)
+    key(Qt.Key_F)
+    check("F lowers zoom speed by 10 %, not pan/tilt", abs(w.zoom_speed - (zoom - 0.1)) < 1e-9 and w.pt_step == step + 1)
+    key(Qt.Key_G)
+    key(Qt.Key_G)
+    check("G raises it", abs(w.zoom_speed - (zoom + 0.1)) < 1e-9 and w.view._toast[0] == f"Zoom speed {round((zoom + 0.1) * 100)} %", w.view._toast)
     check("unbound key is left alone", key(Qt.Key_J, press=False) is False and key(Qt.Key_K) is False)
     w.cam.log.clear()
     w.eventFilter(None, QKeyEvent(QEvent.KeyPress, int(Qt.Key_Comma), Qt.ControlModifier))
     check("Ctrl+, opens settings", w.settings_dialog.isVisible())
+
+    # Canon API: names and recall speed come from the camera, unless set here
+    class CanonCam(Cam):
+        caps = frozenset({"preset_speed"})
+
+        def recall_preset(self, n, speed=None):
+            self.log.append(("recall", n, speed))
+
+        def store_preset(self, n, name=None, speed=None):
+            self.log.append(("store", n, speed))
+
+    w.cam = CanonCam()
+    w.canon_api = object()  # any client: _canon_update only checks that one is connected
+    w.cfg["preset_names"].pop("4", None)
+    w._canon_update({"p.4.name.utf8": "Lectern", "p.5.name.utf8": "Choir"})
+    check("the camera's preset names show on the grid", "Lectern" in w.preset_btns[3].text() and w.preset_name(5) == "Choir", w.preset_btns[3].text())
+    w._set_preset_name(5, "Band")
+    check("a name given here wins over the camera's", w.preset_name(5) == "Band" and "Band" in w.preset_btns[4].text())
+    w._set_preset_speed(4, 30)
+    w.preset(4)
+    w.preset(5)
+    check("recall sends a preset's own speed, else the camera's saved one", w.cam.log[-2:] == [("recall", 4, 30), ("recall", 5, None)], w.cam.log[-2:])
+    w.preset(4, store=True)
+    check("storing keeps the preset's speed", w.cam.log[-1] == ("store", 4, 30), w.cam.log[-1])
+    check("the speed shows in the tooltip", "Recall speed 30" in w.preset_btns[3].toolTip())
+    w._set_preset_speed(4, None)
+    w.preset(4)
+    check("clearing it goes back to the camera's saved speed", w.cam.log[-1] == ("recall", 4, None) and "4" not in w.cfg["preset_speeds"])
+    w.cam = Cam()
+    w._set_preset_speed(6, 50)
+    w.preset(6)
+    check("NDI / VISCA recall ignores Canon preset speeds", w.cam.log[-1] == ("recall", 6), w.cam.log[-1])
     w.worker.stop()
     print("all passed" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

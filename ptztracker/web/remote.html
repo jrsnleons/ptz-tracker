@@ -379,10 +379,10 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
     presetsEl.appendChild(b);
   }
   const speedEl = $("speedSeg");
-  for (let i = 1; i <= 5; i++) {
+  for (const [n, text] of [[-1, "Slower"], [1, "Faster"]]) {
     const b = document.createElement("button");
-    b.type = "button"; b.textContent = i;
-    b.addEventListener("click", () => act("speed", { n: i }));
+    b.type = "button"; b.textContent = text;
+    b.addEventListener("click", () => act("speed", { n }));
     speedEl.appendChild(b);
   }
   function render() {
@@ -398,8 +398,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
     tb.setAttribute("aria-pressed", s.tracking ? "true" : "false");
     $("autoBtn").classList.toggle("on", !!s.auto_pick);
     $("autoBtn").setAttribute("aria-pressed", s.auto_pick ? "true" : "false");
-    [...speedEl.children].forEach((b, i) => b.classList.toggle("sel", i + 1 === s.speed));
-    $("speedName").textContent = s.speed ? `${s.speed} · ${s.speed_name}` : "";
+    $("speedName").textContent = s.speed || "";
     $("storeBtn").hidden = !s.allow_store;
     if (!s.allow_store && storing) setStoring(false);
     renderPresets();

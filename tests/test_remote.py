@@ -195,8 +195,11 @@ def test_window(app):
 
     r.on_command("c1", {"t": "act", "a": "track"})
     check("track toggles tracking on", w.track_btn.isChecked())
-    r.on_command("c1", {"t": "act", "a": "speed", "n": 4})
-    check("speed level set", w.speed_level == 4)
+    step = w.pt_step
+    r.on_command("c1", {"t": "act", "a": "speed", "n": 1})
+    r.on_command("c1", {"t": "act", "a": "speed", "n": 1})
+    r.on_command("c1", {"t": "act", "a": "speed", "n": -1})
+    check("Faster / Slower step pan/tilt by one", w.pt_step == step + 1, w.pt_step)
     r.on_command("c1", {"t": "act", "a": "auto_pick", "on": False})
     check("auto-pick off", not w.auto_pick.isChecked() and not w.worker.auto_pick)
     r.on_command("c1", {"t": "joy", "x": 0.3, "y": 0.3})
@@ -214,7 +217,7 @@ def test_window(app):
     check("overlay boxes are in 0..1 frame units", ov["dets"] == [[0.1, 0.1, 0.2, 0.2]] and ov["box"] == [0.1, 0.1, 0.2, 0.2], ov)
 
     s = r.state()
-    check("state carries tracking, speed and the stage slot", s["speed"] == 4 and s["stage_preset"] == w.stage.home_preset and s["tracking"] is False)
+    check("state carries tracking, speed and the stage slot", s["speed"] == f"Pan/tilt {step + 1} · Zoom 50 %" and s["stage_preset"] == w.stage.home_preset and s["tracking"] is False)
 
     # enabling from the tab starts the server and keeps the PIN
     r.cfg["port"] = free_port()

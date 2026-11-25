@@ -53,6 +53,7 @@ def run(out_path):
             lines.append(f"FAIL {name}:\n{traceback.format_exc()}")
 
     from . import app as appmod
+    from .widgets import resource_path
     from . import ptz as ptzmod
     from .detector import HeadDetector, default_model_path
     from .sources import HAVE_NDI, NDIFinder
@@ -71,7 +72,7 @@ def run(out_path):
         return f"{d.provider}, {len(dets)} detections on noise"
 
     def icon():
-        p = appmod.resource_path("assets", "icon.png")
+        p = resource_path("assets", "icon.png")
         assert os.path.exists(p), p
         return p
 

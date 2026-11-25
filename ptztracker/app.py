@@ -1,6 +1,5 @@
 """PTZ Tracker — auto head tracking + manual PTZ control in one window (macOS and Windows)."""
 import faulthandler
-import json
 import logging
 import os
 import sys
@@ -8,9 +7,8 @@ import threading
 import time
 from dataclasses import asdict, fields
 
-import numpy as np
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QCursor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPalette, QPen, QPixmap, QPolygonF
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QCursor, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -20,15 +18,12 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
-    QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QScrollArea,
-    QSlider,
     QSpinBox,
     QStackedWidget,
     QTabWidget,
@@ -36,1031 +31,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import keys, motion, picture, platform_paths, updater
+from . import canon_http, keys, motion, picture, platform_paths
 from .remote_ui import RemoteControl
 from . import ptz as ptzmod
 from .detector import HeadDetector, default_model_path
 from .sources import HAVE_NDI, CVSource, NDIFinder, NDISource
-from .stage import CanonPositionPoller, Homing, StageBounds, StageSettings, angle_to_pixel, pixel_to_angle
-from .tracking import CamController, TargetTracker, TrackSettings
-from .version import __version__
+from .stage import StageBounds, StageSettings
+from .tracking import TrackSettings
+from .config import load_config, save_config
+from .video_view import VideoView
+from .picture_panel import CanonPicturePanel
+from .update_ui import UpdateMixin
+from .widgets import MOD, AMBER, GREEN, INK2, INK3, KeyButton, PANEL, STYLE, TrackButton, dark_palette, dot_icon, hold_button, label, nofocus, resource_path, section, setting, slider
+from .worker import TrackerWorker
 
-CONFIG_DIR = platform_paths.config_dir()
-CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
-PERF_LOG = os.path.join(platform_paths.log_dir(), "perf.log")
+
+log = logging.getLogger("ptztracker")
+
 APP_LOG = os.path.join(platform_paths.log_dir(), "app.log")
 NO_VIDEO_HINT = 6.0  # connected this long with no picture -> say what to check
-log = logging.getLogger("ptztracker")
-STALL_STOP = 0.5  # no new video for this long while tracking -> stop the camera
-
-DEFAULT_CONFIG = {
-    "video": "NDI",
-    "ndi_name": "",
-    "ndi_high_bandwidth": False,
-    "rtsp_url": "rtsp://192.168.0.80/stream1",
-    "webcam_index": 0,
-    "control": "VISCA over IP",
-    "camera_ip": "192.168.254.122",  # LWNRA-PTZ_CAM (Canon CR-N300) on the church network
-    "visca_port": 52381,
-    "visca_raw": False,
-    "zoom_scaled_speed": True,  # slow pan/tilt down when zoomed in
-    "keys": {},  # action -> [keys]; missing actions use keys.DEFAULTS
-    "key_layouts": {},  # name -> saved "keys" dict
-    "preset_names": {},  # "3": "Pulpit"
-    "picture": {},  # camera -> last picture values sent
-    "looks": {},  # name -> picture values
-    "update_auto": True,
-    "update_skip": "",
-    "auto_pick": True,
-    "tracking": asdict(TrackSettings()),
-    "stage": asdict(StageSettings()),
-    "remote": {},  # phone/tablet remote control; remote_ui.DEFAULTS fills it in
-}
-
-
-def load_config():
-    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
-    try:
-        with open(CONFIG_PATH, encoding="utf-8-sig") as f:  # -sig: Notepad/PowerShell add a BOM
-            saved = json.load(f)
-        tracking = {**cfg["tracking"], **saved.pop("tracking", {})}
-        stage = {**cfg["stage"], **saved.pop("stage", {})}
-        remote = saved.pop("remote", {})
-        cfg.update(saved)
-        cfg["tracking"] = tracking
-        cfg["stage"] = stage
-        cfg["remote"] = remote if isinstance(remote, dict) else {}
-    except (OSError, ValueError):
-        pass
-    return motion.migrate_speed(cfg)
-
-
-def save_config(cfg):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(cfg, f, indent=2)
-
-
-# --------------------------------------------------------------------------- worker
-
-
-class TrackerWorker(QThread):
-    frame_ready = Signal(object)  # dict with frame + overlay data
-    error = Signal(str)
-    stage_event = Signal(str)
-    tracking_stopped = Signal()
-
-    def __init__(self, detector, settings: TrackSettings, stage: StageSettings):
-        super().__init__()
-        self.detector = detector
-        self.settings = settings
-        self.stage = stage
-        self.poller = None
-        self.stage_state = "tracking"  # tracking | homing (on the way back) | waiting (parked on the stage shot)
-        self.homing = None
-        self._home_reason = ""
-        self._home_request = False
-        self._cancel_home = False
-        self._was_enabled = False
-        self._last_ok = 0.0
-        self._outside_since = None
-        self._home_since = 0.0
-        self._present = 0
-        self.tracker = TargetTracker()
-        self.controller = CamController(settings)
-        self.source = None
-        self.ptz = ptzmod.PTZBase()
-        self.tracking_enabled = False
-        self.auto_pick = True
-        self.manual_active = False
-        self._click = None
-        self._release = False
-        self._lock = threading.Lock()
-        self._running = True
-        self._was_sending = False
-        self._stalled = False
-        self._resume_fov = None  # horizontal field of view to ease to (degrees) while tracking resumes
-        self.show_bounds = False  # draw the stage outline even while the stage feature is off (editing)
-        self.gui_busy = False  # set while the GUI still has a frame to paint; newer ones are dropped
-        self._err_at = 0.0
-        self._perf = None
-        try:
-            os.makedirs(os.path.dirname(PERF_LOG), exist_ok=True)
-            self._perf = open(PERF_LOG, "a", buffering=1)
-        except OSError:
-            pass
-
-    def _report(self, msg):
-        """Logs the current exception and shows it in the status bar, at most every few seconds so a repeating
-        one doesn't flood either."""
-        now = time.monotonic()
-        if now - self._err_at > 3:
-            self._err_at = now
-            log.error(msg, exc_info=True)
-            self.error.emit(msg)
-
-    def set_io(self, source, ptz, poller=None):
-        with self._lock:
-            self.source = source
-            self.ptz = ptz or ptzmod.PTZBase()
-            self.poller = poller
-            self.tracker.release()
-            self.controller.reset()
-
-    def click(self, x, y):
-        with self._lock:
-            self._click = (x, y)
-
-    def release_target(self):
-        with self._lock:
-            self._release = True
-
-    def request_home(self):
-        with self._lock:
-            self._home_request = True
-
-    def cancel_home(self):
-        with self._lock:
-            self._cancel_home = True
-
-    def stop(self):
-        self._running = False
-        self.wait(2000)
-
-    def go_home(self, cam, reason):
-        self._resume_fov = None
-        self.tracker.release()
-        self.controller.reset()
-        slow = self.stage.home_speed < 0.99 and self.stage.home is not None and self.poller is not None
-        self.homing = Homing(
-            cam, self.poller, self.stage.home_preset, self.stage.home, drive_only=slow, max_speed=self.stage.home_speed
-        )
-        self._home_reason = reason
-        self.stage_state = "homing"
-        self._present = 0
-        self.stage_event.emit(f"{reason} — going back to the stage shot")
-
-    def _homing_done(self, now):
-        result, self.homing = self.homing.result, None
-        self.stage_state = "waiting"
-        self._home_since = now
-        how = "" if result == "preset" else f" ({result})"
-        if result == "gave up":
-            msg = f"{self._home_reason} — could not reach the stage shot, check the camera"
-        elif not self.tracking_enabled:
-            msg = f"At the stage shot{how}"
-        elif self.stage.auto_resume:
-            msg = f"{self._home_reason} — at the stage shot{how}, waiting for someone on stage"
-        else:
-            self.tracking_enabled = False
-            self.tracking_stopped.emit()
-            msg = f"{self._home_reason} — at the stage shot{how}, tracking stopped"
-        self.stage_event.emit(msg)
-
-    def _stage_check(self, cam, box, inside_box, now):
-        """Returns False once it has sent the camera home."""
-        if box is not None and inside_box:
-            self._last_ok = now
-            self._outside_since = None
-            return True
-        if box is not None:
-            self._outside_since = self._outside_since or now
-            if now - self._outside_since > self.stage.leave_seconds:
-                self.go_home(cam, "Speaker left the stage")
-                return False
-            return True
-        self._outside_since = None
-        if now - self._last_ok > self.stage.lost_seconds:
-            self.go_home(cam, "Lost the speaker")
-            return False
-        return True
-
-    def _resume_zoom(self):
-        """Zoom speed toward the resume zoom level, or None once it is reached (or not in use)."""
-        if self._resume_fov is None:
-            return None
-        pos = self.poller.latest() if self.poller else None
-        if pos is None or self.manual_active:
-            self._resume_fov = None
-            return None
-        err = self._resume_fov - pos.hfov  # + = need a wider view
-        if abs(err) < 1.0:
-            self._resume_fov = None
-            self.ptz.zoom(0)
-            return None
-        return (-1 if err > 0 else 1) * min(self.stage.resume_speed, 0.4 if abs(err) > 3 else 0.15)
-
-    def _idle(self, cam, src):
-        """No new frame: keep homing going, and stop the camera if the video has stalled."""
-        if self.homing is not None and self.homing.step():
-            self._homing_done(time.monotonic())
-        last = src.latest.t
-        if self._was_sending and not self.manual_active and not self._stalled and last and time.monotonic() - last > STALL_STOP:
-            self._stalled = True
-            self.controller.reset()
-            cam.stop()
-            self.stage_event.emit("Video stalled — camera stopped until frames come back")
-
-    def _log_perf(self, fps, det_ms, loop_ms, age_ms, dropped):
-        if self._perf is None:
-            return
-        try:
-            self._perf.write(
-                f"{time.strftime('%Y-%m-%d %H:%M:%S')} fps={fps:.1f} detect_ms={det_ms:.1f} "
-                f"loop_ms={loop_ms:.1f} frame_age_ms={age_ms:.1f} gui_dropped={dropped} state={self.stage_state} "
-                f"tracking={int(self.tracking_enabled)}\n"
-            )
-        except (OSError, ValueError):
-            pass
-
-    def run(self):
-        fps_t, fps_n, fps = time.monotonic(), 0, 0.0
-        det_sum = loop_sum = age_sum = 0.0
-        dropped = 0
-        timing = (0.0, 0.0, 0.0)
-        while self._running:
-            with self._lock:
-                src, cam = self.source, self.ptz
-                click, self._click = self._click, None
-                release, self._release = self._release, False
-                home_req, self._home_request = self._home_request, False
-                cancel_home, self._cancel_home = self._cancel_home, False
-            if src is None:
-                time.sleep(0.05)
-                continue
-            try:
-                frame, arrived = src.read()
-            except Exception as e:  # source died
-                self._report(f"Video error: {e}")
-                time.sleep(0.5)
-                continue
-            if frame is None:
-                self._idle(cam, src)
-                continue
-            try:
-                self._stalled = False
-                h, w = frame.shape[:2]
-                now = time.monotonic()
-                t0 = time.perf_counter()
-                try:
-                    all_dets = self.detector.detect(frame)
-                except Exception as e:
-                    was = self.detector.provider
-                    if self.detector.use_cpu():
-                        self._report(f"Detection failed on {was}, switched to CPU")
-                    else:
-                        self._report(f"Detection error: {e}")
-                    all_dets = np.zeros((0, 5), np.float32)
-                t_det = time.perf_counter() - t0
-                centre_y = (all_dets[:, 1] + all_dets[:, 3]) / 2
-                dets = all_dets[centre_y <= self.settings.ignore_below * h]
-
-                # stage boundary: work out which heads are on stage, in camera angles
-                shown = self.stage.get_bounds()
-                bounds = shown if self.stage.enabled else None
-                pos = self.poller.at(now - self.stage.video_latency) if (shown and self.poller) else None
-                stage_on = pos is not None and bounds is not None
-
-                def on_stage(b):
-                    pt = pixel_to_angle((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, pos, w, h)
-                    return bounds.contains(*pt, margin=self.stage.margin)
-
-                on_mask = np.array([on_stage(d) for d in dets], dtype=bool) if stage_on else np.ones(len(dets), bool)
-                candidates = dets[on_mask]
-
-                if self.tracking_enabled and not self._was_enabled and self.homing is None:
-                    self.stage_state = "tracking"
-                    self._last_ok = now
-                    self._outside_since = None
-                self._was_enabled = self.tracking_enabled
-
-                # trip back to the stage shot (automatic, or the "Go to stage shot" button)
-                if home_req:
-                    self.go_home(cam, "Stage shot")
-                if self.homing is not None and (cancel_home or self.manual_active):
-                    self.homing.cancel()  # STOP pressed or the operator took over
-                    self.homing = None
-                    self.stage_state = "tracking"
-                if self.homing is not None and self.homing.step():
-                    self._homing_done(now)
-
-                if release:
-                    self.tracker.release()
-                if click is not None:
-                    if self.tracker.select_at(click[0], click[1], dets):
-                        self.stage_state = "tracking"
-                        self._last_ok = now
-                box = self.tracker.update(dets)
-
-                homing = self.homing is not None
-                waiting = self.tracking_enabled and (homing or (stage_on and self.stage_state == "waiting"))
-                if waiting and homing:
-                    self.tracker.release()
-                    box = None
-                elif waiting:
-                    # parked on the stage shot: resume once someone is clearly on stage again
-                    self.tracker.release()
-                    box = None
-                    settled = self.poller.settled() and now - self._home_since > 1.5
-                    self._present = self._present + 1 if (settled and len(candidates)) else 0
-                    if self._present >= 10 and self.tracker.select_largest(candidates):
-                        box = self.tracker.box
-                        self.stage_state = "tracking"
-                        self._last_ok = now
-                        waiting = False
-                        if self.stage.resume_move and self.stage.resume_shot and self.poller:
-                            self._resume_fov = self.stage.resume_shot["hfov"]  # tracking starts now; zoom eases to this
-                        self.stage_event.emit("Someone is back on stage — tracking resumed")
-                elif not self.tracker.active and self.tracking_enabled and self.auto_pick:
-                    if self.tracker.select_largest(candidates):
-                        box = self.tracker.box
-
-                pan = tilt = zoom = 0.0
-                if self.tracking_enabled and not self.manual_active and stage_on and not waiting:
-                    inside = box is not None and on_stage(box)
-                    if not self._stage_check(cam, box, inside, now):
-                        waiting = True  # just sent the camera home
-                if self.tracking_enabled and not self.manual_active and not waiting:
-                    pan, tilt, zoom = self.controller.compute(box, w, h)
-                    cur = self.poller.latest() if stage_on else None
-                    if cur is not None:
-                        # never aim the camera past the edge of the stage
-                        if (cur.pan >= bounds.pan_max and pan > 0) or (cur.pan <= bounds.pan_min and pan < 0):
-                            pan = 0.0
-                        if (cur.tilt >= bounds.tilt_max and tilt > 0) or (cur.tilt <= bounds.tilt_min and tilt < 0):
-                            tilt = 0.0
-                    rz = self._resume_zoom()
-                    if rz is not None:
-                        # easing to the resume zoom: keep following, but no faster than the resume speed
-                        cap = self.stage.resume_speed
-                        pan, tilt, zoom = float(np.clip(pan, -cap, cap)), float(np.clip(tilt, -cap, cap)), rz
-                    cam.pan_tilt(pan, tilt)
-                    if rz is not None or not self.settings.lock_zoom:
-                        cam.zoom(zoom)
-                    self._was_sending = True
-                elif waiting or self.homing is not None:
-                    # homing does its own stopping; another stop here would cancel the preset move
-                    self._was_sending = False
-                elif self._was_sending:
-                    # tracking just turned off: make sure the camera stops
-                    self.controller.reset()
-                    if not self.manual_active:
-                        cam.stop()
-                    self._was_sending = False
-
-                fps_n += 1
-                det_sum += t_det
-                loop_sum += time.perf_counter() - t0
-                age_sum += now - arrived
-                now = time.monotonic()
-                if now - fps_t >= 1.0:
-                    fps = fps_n / (now - fps_t)
-                    timing = (det_sum / fps_n * 1000, loop_sum / fps_n * 1000, age_sum / fps_n * 1000)
-                    self._log_perf(fps, *timing, dropped)
-                    fps_n, fps_t, det_sum, loop_sum, age_sum, dropped = 0, now, 0.0, 0.0, 0.0, 0
-                if self.gui_busy:
-                    dropped += 1  # the GUI hasn't painted the last frame yet; skip this one
-                    continue
-                self.gui_busy = True
-                self.frame_ready.emit(
-                    {
-                        "frame": frame,
-                        "dets": dets,
-                        "ignored": len(all_dets) - len(dets),
-                        "box": None if self.tracker.box is None else self.tracker.box.copy(),
-                        "lost": self.tracker.is_lost,
-                        "out": (pan, tilt, zoom),
-                        "fps": fps,
-                        "timing": timing,
-                        "pos": pos,
-                        "bounds": shown if (self.stage.enabled or self.show_bounds) else None,
-                        "off_stage": len(dets) - int(on_mask.sum()),
-                        "stage_state": self.stage_state if (self.homing is not None or (stage_on and self.tracking_enabled)) else None,
-                    }
-                )
-            except Exception as e:  # never let one bad frame kill the video thread
-                self._report(f"Tracking error: {e}")
-                if not self.gui_busy:  # still show the picture
-                    self.gui_busy = True
-                    self.frame_ready.emit(
-                        {"frame": frame, "dets": np.zeros((0, 5), np.float32), "ignored": 0, "box": None, "lost": False,
-                         "out": (0.0, 0.0, 0.0), "fps": fps, "timing": timing, "pos": None, "bounds": None,
-                         "off_stage": 0, "stage_state": None}
-                    )  # fmt: skip
-                time.sleep(0.05)
-
-
-# --------------------------------------------------------------------------- video view
-
-
-class VideoView(QWidget):
-    clicked = Signal(float, float)  # frame coordinates
-    rect_drawn = Signal(float, float, float, float)  # frame coordinates (stage drawing)
-    drag_move = Signal(float, float)  # joystick drag on the video: pan, tilt in -1..1
-    drag_end = Signal()
-    wheel_zoom = Signal(int)  # +1 zoom in, -1 zoom out, 0 stop
-    bounds_edited = Signal(dict)  # stage bounds changed by dragging their edges (live)
-    bounds_edit_done = Signal()
-
-    def __init__(self, settings: TrackSettings):
-        super().__init__()
-        self.settings = settings
-        self.data = None
-        self.image = None
-        self.draw_mode = False
-        self._drag = None  # (start, current) in frame coordinates
-        self.edit_mode = False  # drag the stage edges (or the whole box) instead of picking heads
-        self._edit = None  # (grab, start bounds, start angle) while an edge is being dragged
-        self.setMouseTracking(True)
-        self._press = None  # widget position of a press that may become a camera drag
-        self._joy = False  # True once the press has turned into a camera drag
-        self._wheel_timer = QTimer(self, singleShot=True, interval=250, timeout=lambda: self.wheel_zoom.emit(0))
-        self.tracking = False  # green frame round the video while tracking
-        self.placeholder = ""  # text shown when there is no video
-        self._toast = ("", 0.0)  # (text, time it was shown)
-        self._toast_timer = QTimer(self, interval=40, timeout=self._toast_tick)
-        self.setMinimumSize(640, 360)
-        self.setCursor(Qt.CrossCursor)
-
-    TOAST_SECONDS, TOAST_FADE = 1.2, 0.3
-
-    def toast(self, text):
-        """A short message over the video that fades out (e.g. 'Speed 2 · Slow')."""
-        self._toast = (text, time.monotonic())
-        self._toast_timer.start()
-        self.update()
-
-    def _toast_alpha(self):
-        text, t0 = self._toast
-        if not text:
-            return 0.0
-        return min(1.0, max(0.0, (self.TOAST_SECONDS - (time.monotonic() - t0)) / self.TOAST_FADE))
-
-    def _toast_tick(self):
-        if self._toast_alpha() <= 0:
-            self._toast = ("", 0.0)
-            self._toast_timer.stop()
-        self.update()
-
-    def _paint_toast(self, p):
-        a = self._toast_alpha()
-        if a <= 0:
-            return
-        p.setFont(QFont(UI_FONT, 18, QFont.Bold))
-        tr = p.fontMetrics().boundingRect(self._toast[0]).adjusted(-22, -12, 22, 12)
-        tr.moveCenter(QPointF(self.width() / 2, self.height() / 2).toPoint())
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(0, 0, 0, int(190 * a)))
-        p.drawRoundedRect(QRectF(tr), 12, 12)
-        p.setPen(QColor(255, 255, 255, int(255 * a)))
-        p.drawText(tr, Qt.AlignCenter, self._toast[0])
-        p.setBrush(Qt.NoBrush)
-
-    def show_data(self, data):
-        self.data = data
-        f = data["frame"]
-        h, w = f.shape[:2]
-        self.image = QImage(f.data, w, h, f.strides[0], QImage.Format_BGR888).copy()
-        self.update()
-
-    def _rect(self):
-        if self.image is None:
-            return QRectF(self.rect())
-        iw, ih = self.image.width(), self.image.height()
-        scale = min(self.width() / iw, self.height() / ih)
-        dw, dh = iw * scale, ih * scale
-        return QRectF((self.width() - dw) / 2, (self.height() - dh) / 2, dw, dh)
-
-    def _to_frame(self, e):
-        r = self._rect()
-        x = (e.position().x() - r.x()) / r.width() * self.image.width()
-        y = (e.position().y() - r.y()) / r.height() * self.image.height()
-        return min(max(x, 0), self.image.width()), min(max(y, 0), self.image.height())
-
-    def _stage_geometry(self):
-        d = self.data or {}
-        pos, bounds = d.get("pos"), d.get("bounds")
-        return (pos, bounds) if (pos is not None and bounds is not None) else (None, None)
-
-    def _hit(self, e):
-        """Which part of the stage box is under the mouse: a set of 'l','r','t','b' edges, 'move', or None."""
-        pos, b = self._stage_geometry()
-        if pos is None or self.image is None:
-            return None
-        iw, ih = self.image.width(), self.image.height()
-        r = self._rect()
-        tol = 12 * iw / r.width()  # 12 screen pixels, in frame pixels
-        x, y = self._to_frame(e)
-        mid_p, mid_t = (b.pan_min + b.pan_max) / 2, (b.tilt_min + b.tilt_max) / 2
-        left = angle_to_pixel(b.pan_min, mid_t, pos, iw, ih)
-        right = angle_to_pixel(b.pan_max, mid_t, pos, iw, ih)
-        top = angle_to_pixel(mid_p, b.tilt_max, pos, iw, ih)
-        bottom = angle_to_pixel(mid_p, b.tilt_min, pos, iw, ih)
-        if None in (left, right, top, bottom):
-            return None
-        edges = set()
-        within_y = top[1] - tol <= y <= bottom[1] + tol
-        within_x = left[0] - tol <= x <= right[0] + tol
-        if within_y and abs(x - left[0]) <= tol:
-            edges.add("l")
-        if within_y and abs(x - right[0]) <= tol:
-            edges.add("r")
-        if within_x and abs(y - top[1]) <= tol:
-            edges.add("t")
-        if within_x and abs(y - bottom[1]) <= tol:
-            edges.add("b")
-        if edges:
-            return edges
-        if left[0] < x < right[0] and top[1] < y < bottom[1]:
-            return "move"
-        return None
-
-    def _edit_cursor(self, grab):
-        if grab == "move":
-            return Qt.SizeAllCursor
-        if not grab:
-            return Qt.CrossCursor
-        if len(grab) == 2:
-            return Qt.SizeFDiagCursor if grab in ({"l", "t"}, {"r", "b"}) else Qt.SizeBDiagCursor
-        return Qt.SizeHorCursor if grab & {"l", "r"} else Qt.SizeVerCursor
-
-    def _edit_drag(self, e):
-        pos, _ = self._stage_geometry()
-        if pos is None:
-            return
-        grab, start, (sp, st) = self._edit
-        iw, ih = self.image.width(), self.image.height()
-        pan, tilt = pixel_to_angle(*self._to_frame(e), pos, iw, ih)
-        new = dict(start)
-        gap = 1.0  # keep the box at least this many degrees across
-        if grab == "move":
-            dp, dt = pan - sp, tilt - st
-            new = {"pan_min": start["pan_min"] + dp, "pan_max": start["pan_max"] + dp,
-                   "tilt_min": start["tilt_min"] + dt, "tilt_max": start["tilt_max"] + dt}  # fmt: skip
-        else:
-            if "l" in grab:
-                new["pan_min"] = min(pan, start["pan_max"] - gap)
-            if "r" in grab:
-                new["pan_max"] = max(pan, start["pan_min"] + gap)
-            if "t" in grab:
-                new["tilt_max"] = max(tilt, start["tilt_min"] + gap)
-            if "b" in grab:
-                new["tilt_min"] = min(tilt, start["tilt_max"] - gap)
-        self.bounds_edited.emit(new)
-
-    def mousePressEvent(self, e):
-        if self.image is None:
-            return
-        pt = self._to_frame(e)
-        if self.draw_mode:
-            self._drag = (pt, pt)
-        elif self.edit_mode and self._hit(e):
-            pos, b = self._stage_geometry()
-            iw, ih = self.image.width(), self.image.height()
-            self._edit = (self._hit(e), asdict(b), pixel_to_angle(*pt, pos, iw, ih))
-        else:
-            self._press, self._joy = e.position(), False
-
-    def _joystick(self, e):
-        """Drag toward where the camera should look; farther from the press point = faster."""
-        reach = max(self.width(), self.height()) * 0.2
-        d = e.position() - self._press
-        return float(np.clip(d.x() / reach, -1, 1)), float(np.clip(-d.y() / reach, -1, 1))
-
-    def mouseMoveEvent(self, e):
-        if self._drag is not None:
-            self._drag = (self._drag[0], self._to_frame(e))
-            self.update()
-        elif self._edit is not None:
-            self._edit_drag(e)
-        elif self.edit_mode:
-            self.setCursor(self._edit_cursor(self._hit(e)))
-        elif self._press is not None:
-            d = e.position() - self._press
-            if not self._joy and abs(d.x()) + abs(d.y()) > 8:
-                self._joy = True
-                self.setCursor(Qt.ClosedHandCursor)
-            if self._joy:
-                self.drag_move.emit(*self._joystick(e))
-
-    def wheelEvent(self, e):
-        step = e.angleDelta().y()
-        if step:
-            self.wheel_zoom.emit(1 if step > 0 else -1)
-            self._wheel_timer.start()
-
-    def mouseReleaseEvent(self, e):
-        if self._edit is not None:
-            self._edit = None
-            self.bounds_edit_done.emit()
-            return
-        if self._press is not None:
-            joy, self._press, self._joy = self._joy, None, False
-            self.setCursor(Qt.CrossCursor)
-            if joy:
-                self.drag_end.emit()
-            else:
-                self.clicked.emit(*self._to_frame(e))
-            return
-        if self._drag is None:
-            return
-        (x1, y1), (x2, y2) = self._drag[0], self._to_frame(e)
-        self._drag = None
-        if abs(x2 - x1) > 20 and abs(y2 - y1) > 20:
-            self.draw_mode = False
-            self.setCursor(Qt.CrossCursor)
-            self.rect_drawn.emit(x1, y1, x2, y2)
-        self.update()
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#050506"))
-        p.drawRoundedRect(QRectF(self.rect()), 8, 8)
-        p.setBrush(Qt.NoBrush)
-        if self.image is None:
-            p.setPen(QColor(INK3))
-            p.setFont(QFont(UI_FONT, 14))
-            p.drawText(self.rect().adjusted(48, 0, -48, 0), Qt.AlignCenter | Qt.TextWordWrap, self.placeholder)
-            self._paint_toast(p)
-            return
-        r = self._rect()
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-        p.drawImage(r, self.image)
-        sx = r.width() / self.image.width()
-        sy = r.height() / self.image.height()
-
-        def box_rect(b):
-            return QRectF(r.x() + b[0] * sx, r.y() + b[1] * sy, (b[2] - b[0]) * sx, (b[3] - b[1]) * sy)
-
-        d = self.data
-        s = self.settings
-        if s.ignore_below < 1.0:
-            iy = r.y() + s.ignore_below * r.height()
-            p.fillRect(QRectF(r.x(), iy, r.width(), r.bottom() - iy), QColor(0, 0, 0, 110))
-            p.setPen(QPen(QColor(255, 80, 80, 160), 1, Qt.DashLine))
-            p.drawLine(QPointF(r.x(), iy), QPointF(r.right(), iy))
-        # stage boundary, re-projected for wherever the camera is pointing now
-        pos, bounds = d.get("pos"), d.get("bounds")
-        iw, ih = self.image.width(), self.image.height()
-        if pos is not None and bounds is not None:
-            pts = [QPointF(r.x() + x * sx, r.y() + y * sy) for x, y in bounds.outline(pos, iw, ih)]
-            if pts:
-                p.setPen(QPen(QColor(255, 200, 0, 220), 2, Qt.SolidLine if self.edit_mode else Qt.DashLine))
-                p.drawPolygon(QPolygonF(pts))
-            if self.edit_mode:
-                mp, mt = (bounds.pan_min + bounds.pan_max) / 2, (bounds.tilt_min + bounds.tilt_max) / 2
-                handles = [(bounds.pan_min, bounds.tilt_max), (mp, bounds.tilt_max), (bounds.pan_max, bounds.tilt_max),
-                           (bounds.pan_min, mt), (bounds.pan_max, mt),
-                           (bounds.pan_min, bounds.tilt_min), (mp, bounds.tilt_min), (bounds.pan_max, bounds.tilt_min)]  # fmt: skip
-                p.setBrush(QColor(255, 200, 0))
-                p.setPen(QPen(QColor(0, 0, 0), 1))
-                for hp, ht in handles:
-                    pt = angle_to_pixel(hp, ht, pos, iw, ih)
-                    if pt is not None:
-                        p.drawRect(QRectF(r.x() + pt[0] * sx - 5, r.y() + pt[1] * sy - 5, 10, 10))
-                p.setBrush(Qt.NoBrush)
-
-        for det in d["dets"]:
-            off = False
-            if pos is not None and bounds is not None:
-                a = pixel_to_angle((det[0] + det[2]) / 2, (det[1] + det[3]) / 2, pos, iw, ih)
-                off = not bounds.contains(*a)
-            p.setPen(QPen(QColor(130, 130, 130) if off else QColor(120, 120, 255), 2))
-            p.drawRect(box_rect(det))
-
-        # target point + deadzone
-        tx, ty = r.x() + s.target_x * r.width(), r.y() + s.target_y * r.height()
-        dzx, dzy = s.deadzone_x * r.width(), s.deadzone_y * r.height()
-        p.setPen(QPen(QColor(255, 255, 255, 110), 1, Qt.DashLine))
-        p.drawRect(QRectF(tx - dzx, ty - dzy, 2 * dzx, 2 * dzy))
-        p.setPen(QPen(QColor(255, 255, 255, 180), 1))
-        p.drawLine(QPointF(tx - 10, ty), QPointF(tx + 10, ty))
-        p.drawLine(QPointF(tx, ty - 10), QPointF(tx, ty + 10))
-
-        if d["box"] is not None:
-            color = QColor(AMBER) if d["lost"] else QColor(GREEN)
-            br = box_rect(d["box"])
-            p.setPen(QPen(color, 3))
-            p.drawRect(br)
-            p.drawLine(br.center(), QPointF(tx, ty))
-            p.setFont(QFont(UI_FONT, 11, QFont.Bold))
-            tag = "Lost" if d["lost"] else "Following"
-            tr = p.fontMetrics().boundingRect(tag).adjusted(-6, -3, 6, 3)
-            tr.moveBottomLeft(QPointF(br.left() - 1.5, br.top() - 3).toPoint())
-            p.setPen(Qt.NoPen)
-            p.setBrush(color)
-            p.drawRoundedRect(QRectF(tr), 4, 4)
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QColor("#0B2717") if not d["lost"] else QColor("#2A1A00"))
-            p.drawText(tr, Qt.AlignCenter, tag)
-
-        # small chips, top right: what the detector sees and what is held still
-        chips = [f"{len(d['dets'])} head{'s' if len(d['dets']) != 1 else ''}"]
-        if d["ignored"]:
-            chips.append(f"{d['ignored']} in audience")
-        chips += [name for name, attr in (("Pan locked", "lock_horizontal"), ("Tilt locked", "lock_vertical"), ("Zoom locked", "lock_zoom")) if getattr(s, attr)]
-        p.setFont(QFont(UI_FONT, 11))
-        x = r.right() - 10
-        for text in reversed(chips):
-            cr = p.fontMetrics().boundingRect(text).adjusted(-8, -4, 8, 4)
-            cr.moveTopRight(QPointF(x, r.y() + 10).toPoint())
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 160))
-            p.drawRoundedRect(QRectF(cr), 4, 4)
-            p.setPen(QColor(INK))
-            p.drawText(cr, Qt.AlignCenter, text)
-            x = cr.left() - 6
-        p.setBrush(Qt.NoBrush)
-
-        state = d.get("stage_state")
-        banner = None
-        if self.draw_mode:
-            banner = ("Drag a box around the stage", QColor(40, 110, 200, 230))
-        elif self.edit_mode:
-            banner = ("Editing stage: drag an edge or corner, or the middle to move it", QColor(40, 110, 200, 230))
-        elif state == "homing":
-            banner = ("Going back to the stage shot…", QColor(200, 120, 0, 230))
-        elif state == "waiting":
-            banner = ("At the stage shot, waiting for someone on stage", QColor(200, 120, 0, 230))
-        if banner:
-            p.setFont(QFont(UI_FONT, 14, QFont.Bold))
-            br = p.fontMetrics().boundingRect(banner[0]).adjusted(-16, -9, 16, 9)
-            br.moveCenter(QPointF(r.center().x(), r.bottom() - 32).toPoint())
-            p.setPen(Qt.NoPen)
-            p.setBrush(banner[1])
-            p.drawRoundedRect(QRectF(br), 8, 8)
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QColor(255, 255, 255))
-            p.drawText(br, Qt.AlignCenter, banner[0])
-
-        if self._drag is not None:
-            (x1, y1), (x2, y2) = self._drag
-            p.setPen(QPen(QColor(255, 200, 0), 2))
-            p.fillRect(box_rect((min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))), QColor(255, 200, 0, 40))
-            p.drawRect(box_rect((min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))))
-
-        self._paint_toast(p)
-        if self.tracking:
-            p.setPen(QPen(QColor(GREEN), 3))
-            p.drawRoundedRect(QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5), 8, 8)
-
-
-# --------------------------------------------------------------------------- look
-
-INK, INK2, INK3 = "#EDEEF0", "#A3A7AD", "#8A8F96"
-GROUND, PANEL, RAISED, LINE = "#121314", "#1B1C1E", "#242629", "#303236"
-GREEN, RED, AMBER = "#3DD68C", "#F2555A", "#F5A524"
-if platform_paths.IS_WIN:
-    UI_FONT, MONO_FONT, MOD = "Segoe UI Variable Text", "Cascadia Mono", "Ctrl"
-else:
-    UI_FONT, MONO_FONT, MOD = ".AppleSystemUIFont", "Menlo", "⌘"
-
-STYLE = f"""
-QWidget {{ color: {INK}; font-size: 13px; font-family: "{UI_FONT}"; }}
-QMainWindow, #central {{ background: {GROUND}; }}
-#topbar {{ background: {PANEL}; border-bottom: 1px solid {LINE}; }}
-#rail {{ background: {PANEL}; }}
-#railScroll {{ background: {PANEL}; border: 0; border-left: 1px solid {LINE}; }}
-QStatusBar {{ background: {PANEL}; border-top: 1px solid {LINE}; color: {INK2}; font-size: 11px; }}
-QStatusBar QLabel {{ color: {INK2}; font-size: 11px; padding-right: 12px; }}
-QPushButton {{ background: {RAISED}; border: 1px solid {LINE}; border-radius: 8px; padding: 6px 12px; min-height: 18px; }}
-QPushButton:hover {{ background: #2C2E32; }}
-QPushButton:pressed {{ background: #34373B; }}
-QPushButton:disabled {{ color: #5A5D63; }}
-QPushButton#track {{ border: 0; border-radius: 10px; padding: 0; min-height: 66px; max-height: 66px; }}
-QPushButton#track:checked {{ background: {GREEN}; }}
-QCheckBox:disabled, QLabel:disabled {{ color: #5A5D63; }}
-QPushButton#stop {{ background: transparent; border: 2px solid {RED}; color: {RED}; border-radius: 10px; font-size: 15px; font-weight: 700; }}
-QPushButton#stop:hover {{ background: rgba(242, 85, 90, 0.14); }}
-QPushButton#primary {{ background: {INK}; color: {GROUND}; border: 0; border-radius: 10px; font-size: 15px; font-weight: 700; padding: 10px; }}
-QPushButton#primary:hover {{ background: #FFFFFF; }}
-QPushButton#store {{ background: transparent; border: 1px dashed #5A5D63; color: {INK2}; }}
-QPushButton#store:checked {{ background: {AMBER}; border: 1px solid {AMBER}; color: #2A1A00; font-weight: 700; }}
-QPushButton#preset {{ font-size: 14px; font-weight: 600; padding: 4px 2px; }}
-QPushButton#seg {{ padding: 4px 0; border-radius: 6px; font-weight: 600; }}
-QPushButton#seg:checked {{ background: {INK}; color: {GROUND}; border: 0; }}
-QPushButton#keybtn {{ min-width: 84px; padding: 4px 8px; }}
-QPushButton#keybtn:checked {{ border: 1px solid {AMBER}; color: {AMBER}; }}
-QFrame#updatebar {{ background: #1F2A3D; border-bottom: 1px solid {LINE}; }}
-QProgressBar {{ background: {RAISED}; border: 0; border-radius: 4px; max-height: 8px; }}
-QProgressBar::chunk {{ background: {GREEN}; border-radius: 4px; }}
-QPushButton#link {{ background: transparent; border: 0; color: {INK2}; padding: 2px 4px; font-size: 12px; }}
-QPushButton#link:hover {{ color: {INK}; }}
-QPushButton#link:checked {{ color: {AMBER}; font-weight: 600; }}
-QPushButton#link:disabled, QPushButton#store:disabled, QLabel#muted:disabled {{ color: #5A5D63; }}
-QPushButton#chip {{ font-size: 12px; padding: 4px 12px; }}
-QLabel#section {{ color: {INK2}; font-size: 12px; font-weight: 600; }}
-QLabel#hint {{ color: {INK3}; font-size: 11px; }}
-QLabel#muted {{ color: {INK2}; }}
-QLabel#perf {{ color: {INK2}; font-family: "{MONO_FONT}", Consolas, monospace; font-size: 12px; }}
-QLabel#cardTitle {{ font-size: 18px; font-weight: 700; }}
-QFrame#card {{ background: {PANEL}; border: 1px solid {LINE}; border-radius: 12px; }}
-QCheckBox {{ spacing: 8px; }}
-QDialog {{ background: {PANEL}; }}
-QTabWidget::pane {{ border: 0; }}
-QTabBar::tab {{ background: transparent; color: {INK2}; padding: 6px 16px; border-radius: 6px; margin-right: 4px; }}
-QTabBar::tab:selected {{ background: {LINE}; color: {INK}; font-weight: 600; }}
-"""
-
-
-def dark_palette():
-    pal = QPalette()
-    for role, color in (
-        (QPalette.Window, PANEL), (QPalette.WindowText, INK), (QPalette.Base, RAISED), (QPalette.AlternateBase, PANEL),
-        (QPalette.Text, INK), (QPalette.Button, RAISED), (QPalette.ButtonText, INK), (QPalette.ToolTipBase, RAISED),
-        (QPalette.ToolTipText, INK), (QPalette.Highlight, "#4C8BF5"), (QPalette.HighlightedText, "#FFFFFF"),
-        (QPalette.PlaceholderText, INK3), (QPalette.Mid, LINE), (QPalette.Dark, GROUND), (QPalette.Light, "#3A3D42"),
-    ):  # fmt: skip
-        pal.setColor(role, QColor(color))
-    pal.setColor(QPalette.Disabled, QPalette.Text, QColor("#5A5D63"))
-    pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#5A5D63"))
-    pal.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#5A5D63"))
-    return pal
-
-
-def resource_path(*parts):
-    """Files shipped with the app: repo root from source, Contents/Resources in the .app, _internal on Windows."""
-    return os.path.join(platform_paths.resource_dir(), *parts)
-
-
-def dot_icon(color):
-    pm = QPixmap(16, 16)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor(color))
-    p.setPen(Qt.NoPen)
-    p.drawEllipse(4, 4, 8, 8)
-    p.end()
-    return QIcon(pm)
-
-
-# --------------------------------------------------------------------------- helpers
-
-
-def label(text, name=None, wrap=False):
-    lbl = QLabel(text)
-    if name:
-        lbl.setObjectName(name)
-    lbl.setWordWrap(wrap)
-    return lbl
-
-
-def nofocus(b):
-    b.setFocusPolicy(Qt.NoFocus)
-    return b
-
-
-def hold_button(text, on_press, on_release, w=40, h=40, tip=None):
-    b = nofocus(QPushButton(text))
-    b.setFixedSize(w, h)
-    b.pressed.connect(on_press)
-    b.released.connect(on_release)
-    if tip:
-        b.setToolTip(tip)
-    return b
-
-
-def slider(minv, maxv, value, on_change, scale=100.0, fmt=None):
-    """Slider with its value at the right; the row exposes .slider for resets and .set(value) to move it silently.
-    fmt turns the value into the text shown at the right."""
-    row = QWidget()
-    lay = QHBoxLayout(row)
-    lay.setContentsMargins(0, 0, 0, 0)
-    s = QSlider(Qt.Horizontal)
-    s.setRange(round(minv * scale), round(maxv * scale))
-    s.setValue(round(value * scale))
-    s.setFocusPolicy(Qt.NoFocus)
-    s.setMinimumWidth(120)
-    text = fmt or (lambda x: f"{x:.2f}")
-    lbl = label(text(value), "muted")
-    lbl.setFixedWidth(36 if fmt is None else 54)
-    lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-    def changed(v):
-        lbl.setText(text(v / scale))
-        on_change(v / scale)
-
-    def set_value(x):
-        s.blockSignals(True)
-        s.setValue(round(x * scale))
-        s.blockSignals(False)
-        lbl.setText(text(x))
-
-    s.valueChanged.connect(changed)
-    lay.addWidget(s)
-    lay.addWidget(lbl)
-    row.slider, row.scale, row.set = s, scale, set_value
-    return row
-
-
-def setting(title, help_text, control):
-    """A labelled setting: title, the control, then a one-line explanation."""
-    box = QWidget()
-    v = QVBoxLayout(box)
-    v.setContentsMargins(0, 0, 0, 0)
-    v.setSpacing(3)
-    v.addWidget(label(title))
-    v.addWidget(control)
-    v.addWidget(label(help_text, "hint", wrap=True))
-    return box
-
-
-def section(title, *right):
-    row = QHBoxLayout()
-    row.setContentsMargins(0, 0, 0, 0)
-    row.addWidget(label(title, "section"))
-    row.addStretch(1)
-    for w in right:
-        row.addWidget(w)
-    return row
-
-
-class KeyButton(QPushButton):
-    """Shows a key; click it, then press the new key. Esc cancels, Backspace/Delete clears."""
-
-    captured = Signal(int)
-    cleared = Signal()
-
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("keybtn")
-        self.setCheckable(True)
-        self.shown = ""
-        self.toggled.connect(self._toggled)
-
-    def set_key(self, text):
-        self.shown = text
-        if not self.isChecked():
-            self.setText(text or "—")
-
-    def _toggled(self, on):
-        if on:
-            self.setText("Press a key…")
-            self.setFocus()
-        else:
-            self.setText(self.shown or "—")
-
-    def event(self, e):
-        if self.isChecked() and e.type() == QEvent.KeyPress:  # also takes Tab and Space while listening
-            k = int(e.key())
-            if k in keys.MODIFIER_KEYS:
-                return True
-            self.setChecked(False)
-            if k in (int(Qt.Key_Backspace), int(Qt.Key_Delete)):
-                self.cleared.emit()
-            elif k != int(Qt.Key_Escape):
-                self.captured.emit(k)
-            return True
-        return super().event(e)
-
-    def focusOutEvent(self, e):
-        self.setChecked(False)
-        super().focusOutEvent(e)
-
-
-class TrackButton(QPushButton):
-    """The big start/stop button: a title, a line under it, and the Space key hint."""
-
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("track")
-        self.setCheckable(True)
-        self.setFocusPolicy(Qt.NoFocus)
-        self.setFixedHeight(68)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(18, 8, 18, 8)
-        text = QVBoxLayout()
-        text.setSpacing(2)
-        self.title = label("")
-        self.sub = label("")
-        text.addWidget(self.title)
-        text.addWidget(self.sub)
-        lay.addLayout(text, 1)
-        self.key = label("Space")
-        lay.addWidget(self.key, 0, Qt.AlignVCenter)
-        for w in (self.title, self.sub, self.key):
-            w.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.toggled.connect(lambda _: self._paint_text())
-
-    def set_text(self, title, sub):
-        self.title.setText(title)
-        self.sub.setText(sub)
-        self._paint_text()
-
-    def changeEvent(self, e):
-        super().changeEvent(e)
-        if e.type() == QEvent.EnabledChange:
-            self._paint_text()
-
-    def _paint_text(self):
-        color = "#5A5D63" if not self.isEnabled() else "#0B2717" if self.isChecked() else INK
-        base = f"color: {color}; background: transparent;"
-        self.title.setStyleSheet(base + "font-size: 17px; font-weight: 700;")
-        self.sub.setStyleSheet(base + "font-size: 12px;")
-        self.key.setStyleSheet(base + f"font-size: 11px; font-weight: 600; border: 1px solid {color}; border-radius: 4px; padding: 2px 6px;")
 
 
 # --------------------------------------------------------------------------- main window
@@ -1081,8 +70,8 @@ TRACK_SLIDERS = {
 LOCKS = (("Don't pan (left/right)", "lock_horizontal"), ("Don't tilt (up/down)", "lock_vertical"), ("Don't zoom", "lock_zoom"))
 
 
-class MainWindow(QMainWindow):
-    canon_probed = Signal(dict)  # picture items found on the camera (from a background thread)
+class MainWindow(UpdateMixin, QMainWindow):
+    canon_state = Signal(dict)  # the camera's info list: presets, picture values (from the Canon client's thread)
     update_checked = Signal(object, str, bool)  # release or None, error, was it a manual check
     update_progress = Signal(int)
     update_ready = Signal(str, str)  # downloaded file, error
@@ -1108,10 +97,9 @@ class MainWindow(QMainWindow):
         if not isinstance(self.cfg.get("key_layouts"), dict):
             self.cfg["key_layouts"] = {}
         self._relabels = []  # callables that rewrite key hints on buttons after a bind change
-        self.speed_level = self.cfg["speed_level"]  # nearest stop to the pan/tilt slider; what Z / C and the remote see
-        self.levels = self.cfg["speed_levels"]
-        self.pan_speed = self.cfg["pan_speed"]
-        self.zoom_speed = self.cfg["zoom_speed"]
+        self.pt_step = self.cfg["pt_step"]  # pan/tilt speed step 1-16, as in Canon's Remote Camera Control Application
+        self.pan_speed = motion.pt_speed(self.pt_step)
+        self.zoom_speed = self.cfg["zoom_speed"]  # 0.01-1, shown as 1-100 %
         self.ramp = motion.Ramp()
         self._ramp_t = 0.0
         self._sent_pt = (0.0, 0.0)
@@ -1122,7 +110,8 @@ class MainWindow(QMainWindow):
         self.pic_key = ""
         self.pic_dirty = set()
         self.pic_timer = QTimer(self, singleShot=True, interval=100, timeout=self._pic_flush)
-        self.canon = None
+        self.canon_api = None  # Canon web API (presets, picture, position) whenever the Camera IP is set
+        self.canon_info = {}
         self.release = None  # newer Release found by the update check
         self._checking = False
         self._updating = False
@@ -1146,7 +135,7 @@ class MainWindow(QMainWindow):
         self.view.bounds_edited.connect(self._bounds_edited)
         self.view.bounds_edit_done.connect(self._bounds_edit_done)
 
-        self.canon_probed.connect(self._canon_ready)
+        self.canon_state.connect(self._canon_update)
         self.update_checked.connect(self._update_checked)
         self.update_progress.connect(self._update_progress)
         self.update_ready.connect(self._update_ready)
@@ -1199,7 +188,7 @@ class MainWindow(QMainWindow):
 
         self._set_connected(False)
         self.set_tracking(False)
-        self.set_speeds(self.pan_speed, self.zoom_speed)
+        self.set_speeds(self.pt_step, self.zoom_speed)
         self._relabel_all()
         self.status_timer = QTimer(self, interval=1000, timeout=self._refresh_status)
         self.status_timer.start()
@@ -1262,7 +251,7 @@ class MainWindow(QMainWindow):
         self.view.placeholder = "Waiting for video…" if on else ""
         if on:
             ctrl = self.control_kind.currentText()
-            where = f" · {ctrl} {self.ip_edit.text().strip()}" if ctrl == "VISCA over IP" else f" · {ctrl}"
+            where = f" · {ctrl} {self.ip_edit.text().strip()}" if ctrl in ("VISCA over IP", "Canon API") else f" · {ctrl}"
             self.chip.setText(f"{self.source.name}{where}")
             self.chip.setIcon(dot_icon(GREEN))
             if QApplication.focusWidget():
@@ -1313,18 +302,16 @@ class MainWindow(QMainWindow):
         v.addLayout(row)
 
         self.control_kind = QComboBox()
-        self.control_kind.addItems(["VISCA over IP", "NDI PTZ", "None"])
+        self.control_kind.addItems(["Canon API", "NDI PTZ", "VISCA over IP", "None"])
         self.control_kind.setCurrentText(self.cfg["control"])
         self.ip_edit = QLineEdit(self.cfg["camera_ip"])
         self.ip_edit.setPlaceholderText("Camera IP address")
-        self.control_kind.currentTextChanged.connect(lambda t: self.ip_edit.setEnabled(t == "VISCA over IP"))
-        self.ip_edit.setEnabled(self.control_kind.currentText() == "VISCA over IP")
         row = QHBoxLayout()
         row.addWidget(self.control_kind)
         row.addWidget(self.ip_edit, 1)
         v.addWidget(label("Camera control", "section"))
         v.addLayout(row)
-        v.addWidget(label("Port, raw VISCA and full-quality NDI are in Settings.", "hint"))
+        v.addWidget(label("The Camera IP also reads presets, picture settings and position. Login, port and NDI quality are in Settings.", "hint", wrap=True))
 
         go = nofocus(QPushButton("Connect"))
         go.setObjectName("primary")
@@ -1362,8 +349,16 @@ class MainWindow(QMainWindow):
             else:
                 self.source = CVSource(self.webcam_spin.value())
 
+            ip = self.ip_edit.text().strip()
+            if ip:
+                self.poller = canon_http.CanonClient(ip, self.user_edit.text().strip(), self.pass_edit.text(), on_state=self.canon_state.emit)
+                self.canon_api = canon_http.CanonAPI(self.poller, zoom_linked=lambda: self.cfg["zoom_scaled_speed"])
             ctrl = self.control_kind.currentText()
-            if ctrl == "VISCA over IP":
+            if ctrl == "Canon API":
+                if self.canon_api is None:
+                    raise RuntimeError("Canon API control needs the Camera IP")
+                self.cam = ptzmod.Guarded(self.canon_api)
+            elif ctrl == "VISCA over IP":
                 self.cam = ptzmod.Guarded(ptzmod.VISCAoverIP(self.ip_edit.text().strip(), self.port_spin.value(), self.raw_check.isChecked()))
             elif ctrl == "NDI PTZ":
                 if not isinstance(self.source, NDISource):
@@ -1375,9 +370,6 @@ class MainWindow(QMainWindow):
             self.disconnect_camera()
             QMessageBox.warning(self, "Couldn't connect", str(e))
             return
-        ip = self.ip_edit.text().strip()
-        # position readback for the stage boundary (Canon HTTP API, read-only)
-        self.poller = CanonPositionPoller(ip) if ip else None
         self.worker.set_io(self.source, self.cam, self.poller)
         self._widest_hfov = 0.0
         self._picture_connected(ip)
@@ -1403,7 +395,10 @@ class MainWindow(QMainWindow):
             self.poller = None
         self.cam = ptzmod.PTZBase()
         self.source = None
-        self.canon = None
+        self.canon_api = None
+        self.canon_info = {}
+        self.pic_panel.set_api(None)
+        self._refresh_presets()
         self.view.image = None
         self.perf.setText("")
         self._picture_refresh()
@@ -1449,6 +444,7 @@ class MainWindow(QMainWindow):
         v.addLayout(self._stage_box())
         v.addLayout(self._preset_box())
         v.addLayout(self._manual_box())
+        v.addLayout(self._picture_box())
         v.addStretch(1)
         stop = nofocus(QPushButton())
         stop.setObjectName("stop")
@@ -1673,11 +669,22 @@ class MainWindow(QMainWindow):
         self._on_binds(self._refresh_presets)
         return v
 
+    def preset_name(self, n):
+        """The name you gave a preset here, else the camera's own."""
+        return self.cfg["preset_names"].get(str(n)) or self.canon_info.get(f"p.{n}.name.utf8", "")
+
+    def preset_speed(self, n):
+        """Recall speed for preset n (camera units), or None for the speed the camera saved with it."""
+        return self.cfg["preset_speeds"].get(str(n)) if "preset_speed" in self._caps() else None
+
     def _refresh_presets(self):
-        names, stage_n = self.cfg["preset_names"], self.stage.home_preset
+        if not hasattr(self, "preset_btns"):
+            return
+        stage_n = self.stage.home_preset
         for i, b in enumerate(self.preset_btns):
             n = i + 1
-            name = "Stage" if n == stage_n else names.get(str(n), "")
+            own = self.preset_name(n)
+            name = "Stage" if n == stage_n else own
             short = name if len(name) <= 8 else name[:7] + "…"
             b.setText(f"{n}\n{short}" if name else str(n))
             active = i // 10 == self.bank
@@ -1687,8 +694,12 @@ class MainWindow(QMainWindow):
             if not active:
                 css.append(f"background: {PANEL}; " + ("" if n == stage_n else f"color: {INK3};"))
             b.setStyleSheet("QPushButton { %s }" % " ".join(css) if css else "")
-            tip = f"Preset {n}: click to recall, right-click to rename"
-            b.setToolTip(tip + ("\nThis is the stage shot" if n == stage_n else "") + (f"\n{names[str(n)]}" if str(n) in names else ""))
+            sp = self.cfg["preset_speeds"].get(str(n))
+            tip = f"Preset {n}: click to recall, right-click to rename or set its speed"
+            tip += "\nThis is the stage shot" if n == stage_n else ""
+            tip += f"\n{own}" if own and n != stage_n else ""
+            tip += f"\nRecall speed {sp}" if sp else ""
+            b.setToolTip(tip)
         lo = self.bank * 10 + 1
         self.bank_hint.setText(f"Keys → {lo}–{lo + 9}   ⇧ stores")
         self.bank_btn.setText(f"Bank {self.bank + 1}   {self.binds.short('bank')}".rstrip())
@@ -1705,10 +716,14 @@ class MainWindow(QMainWindow):
         menu.addAction("Rename…", lambda: self._rename_preset(n))
         if str(n) in self.cfg["preset_names"]:
             menu.addAction("Clear name", lambda: self._set_preset_name(n, ""))
+        if "preset_speed" in self._caps():
+            menu.addAction("Recall speed…", lambda: self._ask_preset_speed(n))
+            if str(n) in self.cfg["preset_speeds"]:
+                menu.addAction("Use the camera's saved speed", lambda: self._set_preset_speed(n, None))
         menu.exec(QCursor.pos())
 
     def _rename_preset(self, n):
-        text, ok = QInputDialog.getText(self, "Rename preset", f"Name for preset {n}", text=self.cfg["preset_names"].get(str(n), ""))
+        text, ok = QInputDialog.getText(self, "Rename preset", f"Name for preset {n}", text=self.preset_name(n))
         if ok:
             self._set_preset_name(n, text)
 
@@ -1718,6 +733,22 @@ class MainWindow(QMainWindow):
             self.cfg["preset_names"][str(n)] = text
         else:
             self.cfg["preset_names"].pop(str(n), None)
+        self._refresh_presets()
+        self._save()
+
+    def _ask_preset_speed(self, n):
+        lo = canon_http.num(self.canon_info, "p.ptzspeed.min", 1)
+        hi = canon_http.num(self.canon_info, "p.ptzspeed.max", 100)
+        cur = self.cfg["preset_speeds"].get(str(n)) or canon_http.num(self.canon_info, f"p.{n}.ptz.speed", hi)
+        v, ok = QInputDialog.getInt(self, "Preset speed", f"Recall speed for preset {n} ({lo}-{hi}, higher is faster)", cur, lo, hi)
+        if ok:
+            self._set_preset_speed(n, v)
+
+    def _set_preset_speed(self, n, v):
+        if v is None:
+            self.cfg["preset_speeds"].pop(str(n), None)
+        else:
+            self.cfg["preset_speeds"][str(n)] = int(v)
         self._refresh_presets()
         self._save()
 
@@ -1734,14 +765,16 @@ class MainWindow(QMainWindow):
             ) != QMessageBox.Yes:
                 self.store_btn.setChecked(False)
                 return
-            self.cam.store_preset(n)
+            sp = self.preset_speed(n)
+            self.cam.store_preset(n, speed=sp) if sp else self.cam.store_preset(n)
             self.statusBar().showMessage(f"Stored preset {n}")
             self.store_btn.setChecked(False)
         else:
             self.set_tracking(False)
             self._manual_reset()
-            self.cam.recall_preset(n)
-            name = self.cfg["preset_names"].get(str(n))
+            sp = self.preset_speed(n)
+            self.cam.recall_preset(n, speed=sp) if sp else self.cam.recall_preset(n)
+            name = self.preset_name(n)
             self.statusBar().showMessage(f"Recalled preset {n}" + (f" ({name})" if name else ""))
 
     # ---------------- manual control
@@ -1798,10 +831,10 @@ class MainWindow(QMainWindow):
         speeds = QGridLayout()
         speeds.setHorizontalSpacing(8)
         speeds.setVerticalSpacing(2)
-        self.pan_slider = slider(0.01, 1.0, self.pan_speed, lambda x: self.set_speeds(pan=x))
-        self.zoom_slider = slider(0.01, 1.0, self.zoom_speed, lambda x: self.set_speeds(zoom=x))
-        self.pan_slider.setToolTip("How fast the arrows and the pad pan and tilt")
-        self.zoom_slider.setToolTip("How fast the zoom buttons and keys zoom")
+        self.pan_slider = slider(1, motion.PT_STEPS, self.pt_step, lambda x: self.set_speeds(step=round(x)), 1, lambda x: str(round(x)))
+        self.zoom_slider = slider(0.01, 1.0, self.zoom_speed, lambda x: self.set_speeds(zoom=x), 100, lambda x: f"{round(x * 100)} %")
+        self.pan_slider.setToolTip("How fast the arrows and the pad pan and tilt: 1-16, as in Canon's camera app")
+        self.zoom_slider.setToolTip("How fast the zoom buttons and keys zoom: 1-100 %, as in Canon's camera app")
         for r, (text, row) in enumerate((("Pan / tilt", self.pan_slider), ("Zoom", self.zoom_slider))):
             speeds.addWidget(label(text, "muted"), r, 0)
             speeds.addWidget(row, r, 1)
@@ -1826,43 +859,71 @@ class MainWindow(QMainWindow):
             far.setToolTip(f"Focus farther ({al('focus_far')})")
             once.setText(f"Once  {k('focus_once')}".rstrip())
             once.setToolTip(f"Focus once on the current shot, then hold it ({al('focus_once')})")
-            self.speed_hint.setText(f"{k('speed_down')} slower · {k('speed_up')} faster")
+            self.speed_hint.setText(f"Pan / tilt {k('pan_slower')} slower · {k('pan_faster')} faster    Zoom {k('zoom_slower')} slower · {k('zoom_faster')} faster")
 
         self._on_binds(relabel)
         return v
+
+    def _picture_box(self):
+        v = QVBoxLayout()
+        v.setSpacing(8)
+        toggle = nofocus(QPushButton())
+        toggle.setObjectName("link")
+        self.pic_panel = CanonPicturePanel()
+
+        def show(on):
+            self.pic_panel.setVisible(on)
+            toggle.setText("Hide" if on else "Show")
+            self.cfg["picture_open"] = on
+
+        toggle.clicked.connect(lambda: show(not self.pic_panel.isVisible()))
+        v.addLayout(section("Picture", toggle))
+        v.addWidget(self.pic_panel)
+        show(self.cfg.get("picture_open", True) is not False)
+        return v
+
+    def _canon_update(self, info):
+        """New info list from the camera: picture values and preset names / speeds follow the camera."""
+        if self.canon_api is None:
+            return
+        self.canon_info = info
+        self.pic_panel.update_state(info)
+        self._refresh_presets()
 
     def camera_home(self):
         self._manual_reset()
         self.cam.home()
 
-    def set_speeds(self, pan=None, zoom=None, level=None):
-        """Sets the pan/tilt and / or zoom speed (0.01-1), moves the sliders, and applies it to a move in progress."""
-        if pan is not None:
-            self.pan_speed = self.cfg["pan_speed"] = motion.clean_speed(pan)
-            self.pan_slider.set(self.pan_speed)
+    def set_speeds(self, step=None, zoom=None):
+        """Sets the pan/tilt step (1-16) and / or zoom speed (0.01-1), moves the sliders, and applies it to a move in progress."""
+        if step is not None:
+            self.pt_step = self.cfg["pt_step"] = motion.clean_step(int(step))
+            self.pan_speed = motion.pt_speed(self.pt_step)
+            self.pan_slider.set(self.pt_step)
         if zoom is not None:
             self.zoom_speed = self.cfg["zoom_speed"] = motion.clean_speed(zoom)
             self.zoom_slider.set(self.zoom_speed)
-        self.speed_level = self.cfg["speed_level"] = level or motion.nearest_level(self.pan_speed, self.levels)
         if self.zoom_held:
             self.cam.zoom(self.zoom_held * self.zoom_speed)
         if self.held or self.ramp.active:
             self._start_manual()
         self.remote.push_state()
 
-    def set_speed_level(self, n, toast=True):
-        """Jumps both sliders to one of the five speed stops (the remote, and the Slower / Faster keys)."""
-        n = min(max(int(n), 1), len(motion.LEVEL_NAMES))
-        self.set_speeds(self.levels[n - 1]["pan"], self.levels[n - 1]["zoom"], level=n)
+    def step_speed(self, direction, toast=True):
+        """Slower / Faster: one pan/tilt step down or up (no wraparound)."""
+        self.set_speeds(step=self.pt_step + direction)
         if toast:
-            self.view.toast(f"Speed {n} · {motion.LEVEL_NAMES[n - 1]}")
+            self.view.toast(f"Pan / tilt speed {self.pt_step}")
 
-    def step_speed(self, direction):
-        self.set_speed_level(motion.step_level(self.pan_speed, self.levels, direction))
+    def step_zoom_speed(self, direction, toast=True):
+        """Zoom slower / faster: 10 % down or up (1-100 %)."""
+        self.set_speeds(zoom=self.zoom_speed + 0.1 * direction)
+        if toast:
+            self.view.toast(f"Zoom speed {round(self.zoom_speed * 100)} %")
 
     def _zoom_scale(self):
         pos = self.poller.latest() if self.poller else None
-        if pos is None or not self.cfg["zoom_scaled_speed"]:
+        if pos is None or not self.cfg["zoom_scaled_speed"] or "zoom_linked" in self._caps():  # the camera slows itself
             return 1.0
         self._widest_hfov = max(self._widest_hfov, pos.hfov, (self.stage.home or {}).get("hfov", 0.0))
         return motion.zoom_scale(pos.hfov, self._widest_hfov)
@@ -1990,6 +1051,17 @@ class MainWindow(QMainWindow):
         self.ndi_hq = QCheckBox("Full-quality NDI")
         self.ndi_hq.setChecked(self.cfg["ndi_high_bandwidth"])
         v.addWidget(setting("NDI video", "Off uses the low-bandwidth stream, which tracks just as well with less delay and CPU", self.ndi_hq))
+        self.user_edit = QLineEdit(self.cfg["camera_user"])
+        self.user_edit.setPlaceholderText("User name (blank for none)")
+        self.pass_edit = QLineEdit(self.cfg["camera_password"])
+        self.pass_edit.setPlaceholderText("Password")
+        self.pass_edit.setEchoMode(QLineEdit.Password)
+        login = QWidget()
+        lh = QHBoxLayout(login)
+        lh.setContentsMargins(0, 0, 0, 0)
+        lh.addWidget(self.user_edit)
+        lh.addWidget(self.pass_edit)
+        v.addWidget(setting("Camera login", "The camera's web login (the one Canon's camera app uses). Reading works without it; control may need it. Saved in this computer's settings file.", login))
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
         self.port_spin.setValue(self.cfg["visca_port"])
@@ -2143,25 +1215,10 @@ class MainWindow(QMainWindow):
         restore.clicked.connect(self._restore_keys)
         v.addWidget(restore, 0, Qt.AlignLeft)
 
-        v.addSpacing(12)
-        v.addWidget(label("Speed stops", "section"))
-        v.addWidget(label("The Slower / Faster keys and the remote jump both speed sliders to these. Pan/tilt and zoom speed for each stop, 0–1 of the camera's top speed.", "hint", wrap=True))
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(4)
-        grid.addWidget(label("Pan / tilt", "muted"), 0, 1)
-        grid.addWidget(label("Zoom", "muted"), 0, 2)
-        for i, name in enumerate(motion.LEVEL_NAMES):
-            grid.addWidget(label(f"{i + 1}  {name}"), i + 1, 0)
-            for col, field in ((1, "pan"), (2, "zoom")):
-                grid.addWidget(slider(0.01, 1.0, self.levels[i][field], lambda x, i=i, f=field: self.levels[i].__setitem__(f, x)), i + 1, col)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
-        v.addLayout(grid)
         self.zoom_scale_check = QCheckBox("Slow down pan/tilt when zoomed in")
         self.zoom_scale_check.setChecked(self.cfg["zoom_scaled_speed"])
         self.zoom_scale_check.toggled.connect(lambda on: self.cfg.__setitem__("zoom_scaled_speed", on))
-        v.addWidget(setting("Zoom-aware speed", "Keeps the picture moving at about the same rate at full zoom. Needs the Camera IP so the app can read the zoom.", self.zoom_scale_check))
+        v.addWidget(setting("Zoom-aware speed", "Keeps the picture moving at about the same rate at full zoom. Over the Canon API the camera does this itself (Canon's zoom-linked speed); otherwise it needs the Camera IP so the app can read the zoom.", self.zoom_scale_check))
         v.addStretch(1)
         self._refresh_key_rows()
         self._layout_refresh()
@@ -2334,7 +1391,7 @@ class MainWindow(QMainWindow):
         self.pic_reset = QPushButton("Reset camera to auto")
         self.pic_reset.clicked.connect(self._pic_reset)
         v.addWidget(self.pic_reset, 0, Qt.AlignLeft)
-        v.addWidget(label("Values start from what PTZ Tracker last sent this camera. NDI and VISCA can't read the current picture back.", "hint", wrap=True))
+        v.addWidget(label("For NDI PTZ and VISCA. Values start from what PTZ Tracker last sent this camera, since they can't read the picture back. With the Camera IP set, the Picture panel on the main window reads and changes the camera's own values.", "hint", wrap=True))
         v.addStretch(1)
         self._look_refresh()
         self._picture_refresh()
@@ -2347,9 +1404,6 @@ class MainWindow(QMainWindow):
     def _caps(self):
         return getattr(self.cam, "caps", frozenset())
 
-    def _canon_items(self):
-        return self.canon.items if self.canon else {}
-
     def _pic_key_name(self, ip=None):
         ip = self.ip_edit.text().strip() if ip is None else ip
         return ip or (self.source.name if self.source else "") or "default"
@@ -2358,17 +1412,14 @@ class MainWindow(QMainWindow):
         """New connection: load this camera's saved picture values and start the Canon HTTP probe."""
         self.pic_key = self._pic_key_name(ip)
         self.pic = picture.clean(self.cfg["picture"].get(self.pic_key))
-        self.canon = picture.CanonPicture(ip, self.canon_probed.emit) if ip else None
-        self._picture_refresh()
-
-    def _canon_ready(self, items):
+        self.pic_panel.set_api(self.canon_api)
         self._picture_refresh()
 
     def _picture_refresh(self):
         """Puts the stored values into the controls and greys out what this camera/backend can't do."""
         if not hasattr(self, "pic_rows"):
             return
-        caps, items = self._caps(), self._canon_items()
+        caps = self._caps()
         p = self.pic
         for field, row in self.pic_rows.items():
             row.set(p[field])
@@ -2386,7 +1437,7 @@ class MainWindow(QMainWindow):
         for b in self.pic_modes["wb"].values():
             b.setEnabled(have_wb)
         self.pic_reset.setEnabled(have_exp or have_wb)
-        avail = {w: (w == "sharpness" and "aperture" in caps) or w in items for w in picture.HTTP_WORDS}
+        avail = {w: w == "sharpness" and "aperture" in caps for w in picture.HTTP_WORDS}
         for w in picture.HTTP_WORDS:
             self.pic_rows[w].title.setVisible(avail[w])
             self.pic_rows[w].setVisible(avail[w])
@@ -2398,12 +1449,8 @@ class MainWindow(QMainWindow):
             self.pic_note.setText(f"Changes are sent live over {self.cam.name}. Watch the program feed while you drag.")
             if not all(avail.values()):
                 missing = [w.capitalize() for w in picture.HTTP_WORDS if not avail[w]]
-                where = "over NDI" if self.cam.name == "NDI PTZ" else "on this camera"
-                if self.canon is None:
-                    extra = " Fill in the Camera IP and reconnect to look for them on the camera itself."
-                else:
-                    extra = " The camera's full item list was written to the log (Settings → Camera → Open log folder)."
-                self.profile_note.setText(f"{', '.join(missing)}: not available {where}.{extra}")
+                where = "over NDI" if self.cam.name == "NDI PTZ" else f"over {self.cam.name}"
+                self.profile_note.setText(f"{', '.join(missing)}: not available {where}. With the Camera IP set, the Picture panel on the main window has every setting the camera offers.")
             else:
                 self.profile_note.setText("")
 
@@ -2426,14 +1473,6 @@ class MainWindow(QMainWindow):
         for g in groups:
             if picture.GROUPS[g][0] in caps:
                 picture.send_group(self.cam, g, self.pic)
-        self._send_http_picture(dirty)
-
-    def _send_http_picture(self, fields):
-        """Contrast / saturation (and sharpness when VISCA can't) go to the camera's HTTP API, if it has them."""
-        items = self._canon_items()
-        for f in fields:
-            if f in picture.HTTP_WORDS and f in items and not (f == "sharpness" and "aperture" in self._caps()):
-                self.canon.set(f, self.pic[f])
 
     def _pic_mode(self, field, mode):
         self.pic[field] = mode
@@ -2469,7 +1508,6 @@ class MainWindow(QMainWindow):
         self.pic = picture.clean(self.cfg["looks"][name])
         self._pic_store()
         picture.send_all(self.cam, self.pic)
-        self._send_http_picture(picture.HTTP_WORDS)
         self._picture_refresh()
         self.statusBar().showMessage(f"Picture look: {name}")
 
@@ -2487,174 +1525,6 @@ class MainWindow(QMainWindow):
             self._look_refresh()
             self._save()
 
-    # ---------------- updates
-    def _update_bar(self):
-        bar = QFrame()
-        bar.setObjectName("updatebar")
-        bar.hide()
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(16, 6, 16, 6)
-        self.update_label = label("")
-        h.addWidget(self.update_label)
-        self.update_progress_bar = QProgressBar()
-        self.update_progress_bar.setTextVisible(False)
-        self.update_progress_bar.setFixedWidth(160)
-        self.update_progress_bar.hide()
-        h.addWidget(self.update_progress_bar)
-        h.addStretch(1)
-        self.update_btns = []
-        for text, fn, name in (("What's new", self.show_update_notes, "link"), ("Update now", self.update_now, "chip"), ("Later", self.update_later, "link")):
-            b = nofocus(QPushButton(text))
-            b.setObjectName(name)
-            b.clicked.connect(fn)
-            h.addWidget(b)
-            self.update_btns.append(b)
-        self.update_bar = bar
-        return bar
-
-    def _about_tab(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(4, 16, 4, 4)
-        v.setSpacing(16)
-        v.addWidget(label(f"PTZ Tracker {__version__}", "cardTitle"))
-        self.about_status = label("", "muted", wrap=True)
-        check = QPushButton("Check for updates")
-        check.setFixedWidth(160)
-        check.clicked.connect(lambda: self.check_updates(manual=True))
-        box = QWidget()
-        bl = QVBoxLayout(box)
-        bl.setContentsMargins(0, 0, 0, 0)
-        bl.addWidget(check, 0, Qt.AlignLeft)
-        bl.addWidget(self.about_status)
-        v.addWidget(setting("Updates", "Updates download in the background and never install while you are tracking", box))
-        auto = QCheckBox("Check automatically")
-        auto.setChecked(self.cfg["update_auto"])
-        auto.toggled.connect(lambda on: self.cfg.__setitem__("update_auto", on))
-        v.addWidget(setting("Automatic checks", "A few seconds after launch and every 6 hours. Does nothing if the network is offline", auto))
-        page = QPushButton("Open the releases page")
-        page.setFixedWidth(180)
-        page.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(updater.RELEASES_PAGE)))
-        v.addWidget(setting("Releases", "Every version, with notes", page))
-        v.addStretch(1)
-        return w
-
-    def _auto_check(self):
-        if self.cfg["update_auto"]:
-            self.check_updates()
-
-    def check_updates(self, manual=False):
-        if self._checking or self._updating:
-            return
-        self._checking = True
-        if manual:
-            self.about_status.setText("Checking…")
-
-        def go():
-            try:
-                rel, err = updater.fetch_latest(), ""
-                err = "" if rel else "the update file wasn't in the expected format"
-            except Exception as e:
-                rel, err = None, str(e) or type(e).__name__
-            self.update_checked.emit(rel, err, manual)
-
-        threading.Thread(target=go, daemon=True).start()
-
-    def _update_checked(self, rel, err, manual):
-        self._checking = False
-        if rel is None:
-            log.info("update check failed: %s", err)
-            if manual:
-                self.about_status.setText(f"Couldn't check for updates: {err}")
-            return
-        if not updater.is_newer(rel.version, __version__):
-            if manual:
-                self.about_status.setText(f"You're up to date (version {__version__}).")
-            return
-        self.release = rel
-        if manual:
-            self.about_status.setText(f"Version {rel.version} is available.")
-        if manual or rel.version != self.cfg["update_skip"]:
-            self.update_label.setText(f"PTZ Tracker {rel.version} is available")
-            self.update_bar.show()
-
-    def show_update_notes(self):
-        if self.release:
-            QMessageBox.information(self, f"PTZ Tracker {self.release.version}", self.release.notes or "No release notes.")
-
-    def update_later(self):
-        if self.release:
-            self.cfg["update_skip"] = self.release.version
-            self._save()
-        self.update_bar.hide()
-
-    def update_now(self):
-        rel = self.release
-        if rel is None or self._updating:
-            return
-        if self.track_btn.isChecked():
-            if QMessageBox.question(self, "Stop tracking?", "Tracking is on. Stop tracking to update now?") != QMessageBox.Yes:
-                return
-            self.set_tracking(False)
-        name, sha = updater.pick_asset(rel)
-        if not updater.can_self_update() or not name:
-            self._update_fallback(rel.page, "This copy can't update itself here." if getattr(sys, "frozen", False) else "")
-            return
-        self._updating = True
-        for b in self.update_btns:
-            b.setEnabled(False)
-        self.update_label.setText(f"Downloading PTZ Tracker {rel.version}…")
-        self.update_progress_bar.setValue(0)
-        self.update_progress_bar.show()
-        dest = os.path.join(updater.work_dir(), name)
-
-        def go():
-            try:
-                updater.download(rel.url(name), dest, lambda f: self.update_progress.emit(int(f * 100)))
-                if not updater.verify_sha256(dest, sha):
-                    raise RuntimeError("the download did not match its checksum")
-                self.update_ready.emit(dest, "")
-            except Exception as e:
-                self.update_ready.emit(dest if os.path.exists(dest) else "", str(e) or type(e).__name__)
-
-        threading.Thread(target=go, daemon=True).start()
-
-    def _update_progress(self, pct):
-        self.update_progress_bar.setValue(pct)
-
-    def _update_ready(self, path, err):
-        try:
-            if err:
-                raise RuntimeError(err)
-            self.update_label.setText("Installing the update…")
-            if platform_paths.IS_WIN:
-                updater.apply_windows(path)
-            else:
-                updater.apply_mac(path)
-            log.info("update handed over, quitting")
-            QTimer.singleShot(300, self._quit_for_update)
-        except Exception as e:
-            log.exception("update failed")
-            self._updating = False
-            self.update_progress_bar.hide()
-            for b in self.update_btns:
-                b.setEnabled(True)
-            self.update_label.setText(f"PTZ Tracker {self.release.version} is available")
-            self._update_fallback(path or self.release.page, f"The update couldn't be installed automatically ({e}).")
-
-    def _update_fallback(self, target, message):
-        """Open the downloaded file (or the release page) so the update can be done by hand."""
-        if message:
-            QMessageBox.warning(self, "Update", message + "\n\nIt will open now so you can finish by hand.")
-        if target and os.path.exists(target):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(target))
-        else:
-            QDesktopServices.openUrl(QUrl(target or updater.RELEASES_PAGE))
-
-    def _quit_for_update(self):
-        self.close()
-        QApplication.quit()
-
     # ---------------- keyboard
     def _press_actions(self):
         return {
@@ -2664,8 +1534,10 @@ class MainWindow(QMainWindow):
             "home": self.camera_home,
             "stage_shot": self.go_stage_home,
             "focus_once": lambda: self.cam.one_push_af(),
-            "speed_down": lambda: self.step_speed(-1),
-            "speed_up": lambda: self.step_speed(1),
+            "pan_slower": lambda: self.step_speed(-1),
+            "pan_faster": lambda: self.step_speed(1),
+            "zoom_slower": lambda: self.step_zoom_speed(-1),
+            "zoom_faster": lambda: self.step_zoom_speed(1),
             "bank": self.toggle_bank,
         }
 
@@ -2711,6 +1583,8 @@ class MainWindow(QMainWindow):
             webcam_index=self.webcam_spin.value(),
             control=self.control_kind.currentText(),
             camera_ip=self.ip_edit.text(),
+            camera_user=self.user_edit.text().strip(),
+            camera_password=self.pass_edit.text(),
             visca_port=self.port_spin.value(),
             visca_raw=self.raw_check.isChecked(),
             auto_pick=self.auto_pick.isChecked(),

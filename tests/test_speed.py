@@ -1,4 +1,4 @@
-"""Speed levels and smoother manual motion: config migration, ramp, diagonals, zoom scaling, and the window's tick.
+"""Speed steps and smoother manual motion: config migration, ramp, diagonals, zoom scaling, and the window's tick.
 
     QT_QPA_PLATFORM=offscreen .venv/bin/python -m tests.test_speed
 """
@@ -30,26 +30,17 @@ def run_ramp(target, secs, dt=1 / 30, ramp=None):
 
 
 def main():
-    # migration of the old single slider
-    check("default levels", [d["pan"] for d in motion.DEFAULT_LEVELS] == [0.03, 0.08, 0.18, 0.35, 0.7] and [d["zoom"] for d in motion.DEFAULT_LEVELS] == [0.15, 0.25, 0.4, 0.6, 1.0])
-    for old, want in ((0.05, 1), (0.5, 4), (1.0, 5), (0.1, 2), (0.2, 3), (0.3, 4), (0.6, 5)):
-        got = motion.migrate_speed({"manual_speed": old})["speed_level"]
-        check(f"manual_speed {old} -> level {want}", got == want, got)
-    c = motion.migrate_speed({"manual_speed": 0.5})
-    check("old key is dropped and levels are filled in", "manual_speed" not in c and len(c["speed_levels"]) == 5)
-    check("a saved speed_level wins over manual_speed", motion.migrate_speed({"manual_speed": 0.05, "speed_level": 5})["speed_level"] == 5)
-    check("fresh config starts at Medium", motion.migrate_speed({})["speed_level"] == 3)
-    check("out-of-range level is clamped", motion.migrate_speed({"speed_level": 9})["speed_level"] == 5)
-    c = motion.migrate_speed({"speed_level": 4})
-    check("configs from before the sliders start at their level's speeds", c["pan_speed"] == 0.35 and c["zoom_speed"] == 0.6, c)
-    c = motion.migrate_speed({"speed_level": 4, "pan_speed": 0.22, "zoom_speed": 5})
-    check("saved slider speeds are kept, and clamped", c["pan_speed"] == 0.22 and c["zoom_speed"] == 1.0, c)
-    check("broken slider speeds fall back to the level", motion.migrate_speed({"pan_speed": "x", "zoom_speed": True})["pan_speed"] == 0.18)
-    L = motion.DEFAULT_LEVELS
-    check("Slower / Faster jump to the next stop from between two", motion.step_level(0.25, L, -1) == 3 and motion.step_level(0.25, L, 1) == 4)
-    check("... and from on a stop", motion.step_level(0.18, L, -1) == 2 and motion.step_level(0.18, L, 1) == 4)
-    check("... and stop at the ends", motion.step_level(0.01, L, -1) == 1 and motion.step_level(1.0, L, 1) == 5)
-    check("broken speed_levels are repaired", motion.clean_levels([{"pan": "x"}, 5])[0] == motion.DEFAULT_LEVELS[0] and len(motion.clean_levels(None)) == 5)
+    # speed steps (Canon's 1-16 for pan/tilt) and migration from older configs
+    check("step L is (L - 1) / 15, step 1 a crawl", motion.pt_speed(16) == 1.0 and motion.pt_speed(8) == 7 / 15 and 0 < motion.pt_speed(1) < motion.pt_speed(2))
+    check("steps past the ends are clamped", motion.pt_speed(40) == 1.0 and motion.clean_step(0) == 1 and motion.clean_step(99) == 16)
+    c = motion.migrate_speed({})
+    check("fresh config starts at step 8 and 50 % zoom", c["pt_step"] == 8 and c["zoom_speed"] == 0.5, c)
+    c = motion.migrate_speed({"pan_speed": 0.35, "zoom_speed": 0.6, "speed_level": 4, "speed_levels": [], "manual_speed": 0.1})
+    check("a 1.4 pan/tilt slider speed becomes the nearest step", c["pt_step"] == motion.nearest_step(0.35) == 6, c)
+    check("its zoom speed is kept, the old stop keys are dropped", c["zoom_speed"] == 0.6 and not {"pan_speed", "speed_level", "speed_levels", "manual_speed"} & set(c), c)
+    check("a 1.2 manual_speed also maps to a step", motion.migrate_speed({"manual_speed": 1.0})["pt_step"] == 16)
+    check("a saved step wins and is clamped", motion.migrate_speed({"pt_step": 20, "pan_speed": 0.1})["pt_step"] == 16)
+    check("broken values fall back", motion.migrate_speed({"pt_step": "x", "zoom_speed": True}) == {"pt_step": 8, "zoom_speed": 0.5})
 
     # ramp
     r, out = run_ramp((0.4, 0.0), 0.1)
@@ -125,36 +116,37 @@ def window_checks():
             app.processEvents()
             time.sleep(0.01)
 
-    check("window starts at Medium", w.speed_level == 3 and w.pan_slider.slider.value() == 18 and w.zoom_slider.slider.value() == 40)
-    w.set_speed_level(2)
+    s8 = motion.pt_speed(8)
+    check("window starts at step 8 and 50 %", w.pt_step == 8 and w.pan_slider.slider.value() == 8 and w.zoom_slider.slider.value() == 50, (w.pt_step, w.pan_slider.slider.value(), w.zoom_slider.slider.value(), w.cfg.get("zoom_speed")))
+    w.set_speeds(step=2)
     w.step_speed(-1)
     w.step_speed(-1)
-    check("slower never goes under 1 (no wraparound)", w.speed_level == 1 and w.pan_slider.slider.value() == 3)
-    for _ in range(9):
+    check("slower never goes under 1 (no wraparound)", w.pt_step == 1 and w.pan_slider.slider.value() == 1)
+    for _ in range(20):
         w.step_speed(1)
-    check("faster stops at 5", w.speed_level == 5 and w.pan_speed == 0.7 and w.zoom_speed == 1.0)
-    check("toast text appears on the video", w.view._toast[0] == "Speed 5 · Max", w.view._toast)
+    check("faster stops at 16 and leaves zoom alone", w.pt_step == 16 and w.pan_speed == 1.0 and w.zoom_speed == 0.5)
+    check("toast text appears on the video", w.view._toast[0] == "Pan / tilt speed 16", w.view._toast)
 
-    w.set_speed_level(3)
+    w.set_speeds(step=8)
     w.manual_press("k", 1, 0)
     first = w.cam.calls[0]
     pump(0.6)
-    check("a held key eases in to the level's speed", first[0] < 0.18 and abs(w.cam.pt[0] - 0.18) < 1e-6, (first, w.cam.pt))
+    check("a held key eases in to the step's speed", first[0] < s8 and abs(w.cam.pt[0] - s8) < 1e-6, (first, w.cam.pt))
     check("tracking is held off while moving", w.worker.manual_active)
-    w.set_speed_level(5)
+    w.set_speeds(step=16)
     pump(0.6)
-    check("changing level while held takes effect at once", abs(w.cam.pt[0] - 0.7) < 1e-6, w.cam.pt)
+    check("changing speed while held takes effect at once", abs(w.cam.pt[0] - 1.0) < 1e-6, w.cam.pt)
     w.manual_release("k")
     pump(0.4)
     check("release eases back to a stop", w.cam.pt == (0.0, 0.0) and not w.ramp.active and not w.ramp_timer.isActive())
     check("tracking is free again afterwards", not w.worker.manual_active)
 
-    w.set_speed_level(3)
+    w.set_speeds(step=8)
     w.manual_press("a", 1, 0)
     w.manual_press("b", 0, 1)
     pump(0.6)
     mag = (w.cam.pt[0] ** 2 + w.cam.pt[1] ** 2) ** 0.5
-    check("diagonal keys move at the straight-line speed", abs(mag - 0.18) < 1e-3 and abs(w.cam.pt[0] - w.cam.pt[1]) < 1e-6, w.cam.pt)
+    check("diagonal keys move at the straight-line speed", abs(mag - s8) < 1e-3 and abs(w.cam.pt[0] - w.cam.pt[1]) < 1e-6, w.cam.pt)
 
     w.emergency_stop()
     check("emergency stop is immediate, no ramp", w.cam.pt == (0.0, 0.0) and not w.held and not w.ramp.active and not w.ramp_timer.isActive())
@@ -173,33 +165,34 @@ def window_checks():
             pass
 
     w.poller = Poller()
-    w.set_speed_level(3)
     w.manual_press("k", 1, 0)
     pump(0.5)
     wide = w.cam.pt[0]
     w.poller.hfov = 15.0
     pump(0.5)
     tele = w.cam.pt[0]
-    check("full tele moves slower than wide", abs(wide - 0.18) < 1e-6 and abs(tele - 0.18 * 0.25) < 1e-6, (wide, tele))
+    check("full tele moves slower than wide", abs(wide - s8) < 1e-6 and abs(tele - s8 * 0.25) < 1e-6, (wide, tele))
+    w.cam.caps = frozenset({"zoom_linked"})
+    pump(0.5)
+    check("a camera that slows itself (Canon API) is not slowed twice", abs(w.cam.pt[0] - s8) < 1e-6, w.cam.pt)
+    w.cam.caps = frozenset()
     w.cfg["zoom_scaled_speed"] = False
     pump(0.5)
-    check("the toggle turns zoom scaling off", abs(w.cam.pt[0] - 0.18) < 1e-6, w.cam.pt)
+    check("the toggle turns zoom scaling off", abs(w.cam.pt[0] - s8) < 1e-6, w.cam.pt)
     w.manual_release("k")
     pump(0.4)
     w.poller = None
     w.zoom_press(1)
-    check("zoom uses the level's zoom speed", abs(w.cam.z - 0.4) < 1e-9, w.cam.z)
-    w.zoom_slider.slider.setValue(77)  # dragging the zoom slider
-    check("the zoom slider changes a zoom in progress, not pan/tilt", abs(w.cam.z - 0.77) < 1e-9 and w.pan_speed == 0.18 and w.cfg["zoom_speed"] == 0.77, (w.cam.z, w.pan_speed))
+    check("zoom uses the zoom speed", abs(w.cam.z - 0.5) < 1e-9, w.cam.z)
+    w.zoom_slider.slider.setValue(77)  # dragging the zoom slider to 77 %
+    check("the zoom slider changes a zoom in progress, not pan/tilt", abs(w.cam.z - 0.77) < 1e-9 and w.pt_step == 8 and w.cfg["zoom_speed"] == 0.77, (w.cam.z, w.pt_step))
     w.zoom_release()
-    w.pan_slider.slider.setValue(25)  # dragging the pan/tilt slider
+    w.pan_slider.slider.setValue(12)  # dragging the pan/tilt slider to step 12
     w.manual_press("k", 1, 0)
     pump(0.5)
-    check("the pan/tilt slider sets the move speed, not the zoom", abs(w.cam.pt[0] - 0.25) < 1e-6 and w.zoom_speed == 0.77 and w.cfg["pan_speed"] == 0.25, w.cam.pt)
+    check("the pan/tilt slider sets the move speed, not the zoom", abs(w.cam.pt[0] - motion.pt_speed(12)) < 1e-6 and w.zoom_speed == 0.77 and w.cfg["pt_step"] == 12, w.cam.pt)
     w.manual_release("k")
     pump(0.4)
-    w.step_speed(1)
-    check("Faster from between two stops goes to the next one up", w.speed_level == 4 and w.pan_speed == 0.35 and w.zoom_speed == 0.6)
 
     # key layouts
     w.binds.assign("home", 0, int(Qt.Key_J))
@@ -213,7 +206,7 @@ def window_checks():
     check("deleting a layout keeps the keys in use", "Ana" not in w.cfg["key_layouts"] and w.binds.keys["home"][0] == int(Qt.Key_J))
     w._save_clicked()
     saved = appmod.load_config()
-    check("Save writes the speeds and keys without closing Settings", saved["pan_speed"] == 0.35 and saved["keys"]["home"][0] == "J" and w.save_btn.text().startswith("Saved"))
+    check("Save writes the speeds and keys without closing Settings", saved["pt_step"] == 12 and saved["zoom_speed"] == 0.77 and saved["keys"]["home"][0] == "J" and w.save_btn.text().startswith("Saved"))
     w.worker.stop()
 
 
