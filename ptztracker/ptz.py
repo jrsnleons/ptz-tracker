@@ -14,12 +14,6 @@ import time
 
 log = logging.getLogger(__name__)
 
-COMMANDS = {
-    "pan_tilt", "zoom", "focus", "autofocus", "one_push_af", "home", "recall_preset", "store_preset", "stop",
-    "exposure_mode", "exposure_level", "exposure_fine", "white_balance_mode", "white_balance_rgb", "aperture",
-}  # fmt: skip
-
-
 class Guarded:
     """Wraps a backend so a failed camera command is logged instead of crashing the app.
 
@@ -103,6 +97,10 @@ class PTZBase:
 
     def status(self):
         return "no camera control"
+
+
+# Every public PTZBase method except these is a camera command, so Guarded protects new commands without a list to update.
+COMMANDS = frozenset(n for n, v in vars(PTZBase).items() if callable(v) and not n.startswith("_")) - {"close", "status"}
 
 
 class VISCAoverIP(PTZBase):

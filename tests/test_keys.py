@@ -25,7 +25,8 @@ def main():
     b = keys.Binds()
     m = b.map()
     check("defaults: WASD and arrows", all(m[code(k)] == a for k, a in (("A", "pan_left"), ("Left", "pan_left"), ("D", "pan_right"), ("Right", "pan_right"), ("W", "tilt_up"), ("Up", "tilt_up"), ("S", "tilt_down"), ("Down", "tilt_down"))))
-    check("defaults: zoom, focus, controls", all(m[code(k)] == a for k, a in (("E", "zoom_in"), ("+", "zoom_in"), ("Q", "zoom_out"), ("-", "zoom_out"), ("[", "focus_near"), ("]", "focus_far"), ("Space", "track"), ("Esc", "release"), ("X", "stop"), ("H", "home"), ("G", "stage_shot"), ("F", "focus_once"), ("Z", "speed_down"), ("C", "speed_up"), ("B", "bank"))))
+    check("defaults: zoom, focus, controls", all(m[code(k)] == a for k, a in (("E", "zoom_in"), ("+", "zoom_in"), ("Q", "zoom_out"), ("-", "zoom_out"), ("[", "focus_near"), ("]", "focus_far"), ("Space", "track"), ("Esc", "release"), ("X", "stop"), ("H", "home"), ("V", "pan_slower"), ("B", "pan_faster"), ("F", "zoom_slower"), ("G", "zoom_faster"))))
+    check("focus once, stage shot and bank start with no key", all(keys.Binds().keys[a] == [None, None] for a in ("focus_once", "stage_shot", "bank")))
     check("defaults: 1-9 and 0 are presets 1-10", all(m[code(str(i % 10))] == f"preset_{i}" for i in range(1, 11)))
     check("no key is bound twice by default", sum(len([c for c in v if c]) for v in b.keys.values()) == len(m))
     check("every action has a label and a kind", all(a in keys.LABELS and keys.KINDS[a] in (keys.HELD, keys.PRESS) for a in b.keys))
@@ -55,10 +56,16 @@ def main():
     check("config without 'keys' gives the defaults", keys.Binds(None).to_cfg() == keys.Binds({}).to_cfg() == keys.Binds().to_cfg())
     junk = keys.Binds({"pan_left": "A", "stop": ["???", 5], "zoom_in": ["Ctrl+Shift+Z"], "nope": ["A"]})
     check("junk in the config falls back safely", junk.keys["pan_left"] == [code("A"), code("Left")] and junk.keys["stop"] == [None, None] and "nope" not in junk.keys)
-    old = keys.Binds({"pan_left": ["A", "Left"], "speed_up": [], "track": ["C"]})  # user put C on tracking; 'speed_up' emptied
-    check("a saved bind wins over a new action's default key", old.map()[code("C")] == "track" and old.keys["speed_up"] == [None, None])
-    old = keys.Binds({"track": ["Z"]})  # Z is the default for speed_down, which this old config never heard of
-    check("a new action does not steal a key the user already uses", old.map()[code("Z")] == "track" and old.keys["speed_down"] == [None, None])
+    old = keys.Binds({"pan_left": ["A", "Left"], "zoom_faster": [], "track": ["G"]})  # user put G on tracking; 'zoom_faster' emptied
+    check("a saved bind wins over a new action's default key", old.map()[code("G")] == "track" and old.keys["zoom_faster"] == [None, None])
+    old = keys.Binds({"track": ["V"]})  # V is the default for pan_slower, which this config never heard of
+    check("a new action does not steal a key the user already uses", old.map()[code("V")] == "track" and old.keys["pan_slower"] == [None, None])
+    old = keys.Binds({"speed_down": ["Z"], "speed_up": ["C"], "focus_once": ["F"], "stage_shot": ["G"], "bank": ["B"], "home": ["J"]})
+    check("1.4 binds: F / G / B / V go to the new speed keys", [old.map().get(code(k)) for k in "VBFG"] == ["pan_slower", "pan_faster", "zoom_slower", "zoom_faster"])
+    check("... the old defaults are dropped, Z / C freed, own choices kept",
+          old.keys["focus_once"] == [None, None] and code("Z") not in old.map() and old.map()[code("J")] == "home")  # fmt: skip
+    old = keys.Binds({"speed_down": ["Z"], "speed_up": ["C"], "focus_once": ["K"]})
+    check("... a key the user moved focus once to stays", old.map()[code("K")] == "focus_once")
 
     # resolving key presses
     b = keys.Binds()

@@ -11,7 +11,6 @@ from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from . import motion
 from . import remote as rm
 from .stage import pixel_to_angle
 
@@ -104,12 +103,11 @@ class RemoteControl(QObject):
     # ---------------- state out
     def state(self):
         w = self.win
-        names = {int(k): v for k, v in w.cfg["preset_names"].items() if str(k).isdigit()}
+        names = {n: w.preset_name(n) for n in range(1, 21) if w.preset_name(n)}
         return {
             "tracking": bool(w.track_btn.isChecked()),
             "auto_pick": bool(w.auto_pick.isChecked()),
-            "speed": w.speed_level,
-            "speed_name": motion.LEVEL_NAMES[w.speed_level - 1],
+            "speed": f"Pan/tilt {w.pt_step} · Zoom {round(w.zoom_speed * 100)} %",
             "preset_names": names,
             "stage_preset": w.stage.home_preset,
             "camera": w.source.name if w.source is not None else "",
@@ -210,7 +208,7 @@ class RemoteControl(QObject):
         elif a == "focus_auto":
             w.cam.autofocus(True)
         elif a == "speed":
-            w.set_speed_level(msg["n"])
+            w.step_speed(1 if msg["n"] > 0 else -1)  # the remote's Slower / Faster
         elif a == "auto_pick":
             w.auto_pick.setChecked(msg["on"])
         elif a == "pick":
@@ -276,7 +274,7 @@ class RemoteControl(QObject):
 
     # ---------------- settings tab
     def tab(self):
-        from .app import label, setting
+        from .widgets import label, setting
 
         w = QWidget()
         grid = QGridLayout(w)
@@ -376,7 +374,7 @@ class RemoteControl(QObject):
     def _refresh_clients(self):
         if not hasattr(self, "clients_box"):
             return
-        from .app import label
+        from .widgets import label
 
         while self.clients_box.count():
             item = self.clients_box.takeAt(0)

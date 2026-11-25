@@ -1,8 +1,6 @@
-"""Camera picture settings: the values we last sent (per camera), looks, sending groups, and the Canon HTTP probe."""
+"""Picture settings for NDI PTZ and VISCA, which can't read the camera back: the values we last sent (per camera),
+looks, and sending groups. Over the Canon API the camera's own values are used instead (picture_panel.py)."""
 import logging
-import threading
-import urllib.parse
-import urllib.request
 
 log = logging.getLogger(__name__)
 
@@ -89,76 +87,3 @@ def shutter_text(x):
 
 def percent_text(x):
     return f"{round(x * 100)}%"
-
-
-class CanonPicture:
-    """Reads the camera's whole info.cgi list once on connect (written to the log), and finds Contrast / Sharpness /
-    Saturation items if the camera has them. Untested against the real CR-N300: every step is defensive and runs
-    on a background thread, results come back through `on_ready`."""
-
-    BASE = "-wvhttp-01-"
-
-    def __init__(self, host, on_ready=None):
-        self.host, self.on_ready = host, on_ready
-        self.items = {}  # word -> key name on the camera
-        self.values = {}  # key name -> current text value
-        self.all = {}
-        threading.Thread(target=self._probe, daemon=True).start()
-
-    def _get(self, path, timeout=3.0):
-        return urllib.request.urlopen(f"http://{self.host}/{self.BASE}/{path}", timeout=timeout).read().decode(errors="replace")
-
-    @staticmethod
-    def parse(text):
-        return dict(line.split(":=", 1) for line in text.splitlines() if ":=" in line)
-
-    @staticmethod
-    def find_items(keys):
-        """word -> first key containing it (case-insensitive); skips range/limit helper keys."""
-        found = {}
-        for word in HTTP_WORDS:
-            for k in keys:
-                low = k.lower()
-                if word in low and not low.endswith((".min", ".max", ".range", ".list", ".step")) and word not in found:
-                    found[word] = k
-        return found
-
-    def _probe(self):
-        try:
-            self.all = self.parse(self._get("info.cgi"))
-            log.info("Canon info.cgi: %d items\n%s", len(self.all), "\n".join(f"  {k} = {v}" for k, v in sorted(self.all.items())))
-            self.items = self.find_items(self.all)
-            self.values = {k: self.all[k] for k in self.items.values()}
-            log.info("Canon picture items found: %s", self.items or "none")
-        except Exception as e:
-            log.info("Canon info.cgi probe failed: %s", e)
-        if self.on_ready:
-            try:
-                self.on_ready(dict(self.items))
-            except Exception:
-                log.exception("picture probe callback failed")
-
-    def value_for(self, word, x):
-        """Slider position 0..1 -> the camera's number. The range comes from <key>.min / <key>.max when the list has
-        them; otherwise -10..+10 is a guess, and the log shows what the camera really uses."""
-        key = self.items.get(word)
-        try:
-            lo, hi = int(self.all[key + ".min"]), int(self.all[key + ".max"])
-        except (KeyError, TypeError, ValueError):
-            lo, hi = -10, 10
-        return round(lo + min(1.0, max(0.0, x)) * (hi - lo))
-
-    def set(self, word, x):
-        """Sets one item from a slider position (0..1) without blocking the caller."""
-        key = self.items.get(word)
-        if key is None:
-            return
-        value = self.value_for(word, x)
-
-        def go():
-            try:
-                self._get(f"control.cgi?{urllib.parse.quote(key)}={urllib.parse.quote(str(value))}", timeout=2.0)
-            except Exception as e:
-                log.info("Canon set %s=%s failed: %s", key, value, e)
-
-        threading.Thread(target=go, daemon=True).start()

@@ -9,7 +9,7 @@ import numpy as np
 from PySide6.QtCore import QCoreApplication
 
 from ptztracker import ptz as ptzmod
-from ptztracker.app import TrackerWorker
+from ptztracker.worker import TrackerWorker
 from ptztracker.sources import LatestFrame
 from ptztracker.stage import StageSettings
 from ptztracker.tracking import TrackSettings

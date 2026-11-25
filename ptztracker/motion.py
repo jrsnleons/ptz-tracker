@@ -1,15 +1,9 @@
-"""Manual-move maths: speed levels, ease in / out, diagonal and zoom-scaled speed. No Qt, so it is easy to test."""
+"""Manual-move maths: speed steps, ease in / out, diagonal and zoom-scaled speed. No Qt, so it is easy to test."""
 import math
 
-LEVEL_NAMES = ["Crawl", "Slow", "Medium", "Fast", "Max"]
-DEFAULT_LEVELS = [
-    {"pan": 0.03, "zoom": 0.15},
-    {"pan": 0.08, "zoom": 0.25},
-    {"pan": 0.18, "zoom": 0.40},
-    {"pan": 0.35, "zoom": 0.60},
-    {"pan": 0.70, "zoom": 1.00},
-]
-DEFAULT_LEVEL = 3
+PT_STEPS, DEFAULT_PT_STEP = 16, 8  # pan/tilt speed steps, as in Canon's Remote Camera Control Application
+PT_STEP1 = 0.004  # speed for step 1; the Canon API sends the camera's slowest speed for it, VISCA / NDI their floor
+DEFAULT_ZOOM_SPEED = 0.5  # 50 %
 EASE_IN, EASE_OUT = 0.25, 0.15  # seconds to reach full speed / to stop
 MIN_SPEED = 0.03  # smallest pan/tilt worth sending: below this VISCA rounds to "stop"
 MIN_ZOOM_SCALE = 0.15
@@ -19,46 +13,34 @@ def _num(v, default):
     return min(1.0, max(0.01, float(v))) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
 
 
-def clean_levels(levels):
-    """Saved speed levels, repaired: always 5 {pan, zoom} entries in 0.01..1."""
-    out = []
-    for i, d in enumerate(DEFAULT_LEVELS):
-        src = levels[i] if isinstance(levels, list) and i < len(levels) and isinstance(levels[i], dict) else {}
-        out.append({k: _num(src.get(k), d[k]) for k in d})
-    return out
+def pt_speed(step):
+    """Pan/tilt step 1..16 -> speed 0..1. Step L is (L - 1) / 15, which the Canon API turns into RCCA's exact values."""
+    return PT_STEP1 if step <= 1 else (min(step, PT_STEPS) - 1) / (PT_STEPS - 1)
 
 
-def nearest_level(speed, levels=DEFAULT_LEVELS):
-    """1-based level whose pan speed is closest to an old single 'manual speed' value."""
-    return 1 + min(range(len(levels)), key=lambda i: abs(levels[i]["pan"] - speed))
+def clean_step(v, default=DEFAULT_PT_STEP):
+    return min(PT_STEPS, max(1, v)) if isinstance(v, int) and not isinstance(v, bool) else default
+
+
+def nearest_step(speed):
+    return min(range(1, PT_STEPS + 1), key=lambda L: abs(pt_speed(L) - speed))
 
 
 def migrate_speed(cfg):
-    """Old configs had one manual_speed slider; pick the nearest level. Fills in speed_level / speed_levels."""
-    cfg["speed_levels"] = clean_levels(cfg.get("speed_levels"))
-    level = cfg.get("speed_level")
-    if not isinstance(level, int) or isinstance(level, bool):
-        old = cfg.get("manual_speed")
-        level = nearest_level(float(old), cfg["speed_levels"]) if isinstance(old, (int, float)) else DEFAULT_LEVEL
-    cfg["speed_level"] = min(max(level, 1), len(LEVEL_NAMES))
-    cfg.pop("manual_speed", None)
-    at = cfg["speed_levels"][cfg["speed_level"] - 1]  # configs from before the sliders start at their level's speeds
-    cfg["pan_speed"] = _num(cfg.get("pan_speed"), at["pan"])
-    cfg["zoom_speed"] = _num(cfg.get("zoom_speed"), at["zoom"])
+    """Fills in pt_step (1..16) and zoom_speed (0.01..1). Configs from before 1.5 had a 0..1 pan_speed (or a
+    manual_speed); they get the nearest step. Their speed stops are dropped."""
+    old = cfg.pop("pan_speed", cfg.pop("manual_speed", None))
+    default = nearest_step(old) if isinstance(old, (int, float)) and not isinstance(old, bool) else DEFAULT_PT_STEP
+    cfg["pt_step"] = clean_step(cfg.get("pt_step"), default)
+    cfg["zoom_speed"] = _num(cfg.get("zoom_speed"), DEFAULT_ZOOM_SPEED)
+    for k in ("speed_level", "speed_levels", "manual_speed"):
+        cfg.pop(k, None)
     return cfg
 
 
 def clean_speed(v):
     """A slider speed, kept inside 0.01..1."""
     return _num(v, 0.01)
-
-
-def step_level(speed, levels, direction):
-    """1-based level the Slower / Faster keys jump to from a pan speed: the next stop below or above it."""
-    pans = [d["pan"] for d in levels]
-    if direction < 0:
-        return max([i + 1 for i, p in enumerate(pans) if p < speed - 1e-6], default=1)
-    return min([i + 1 for i, p in enumerate(pans) if p > speed + 1e-6], default=len(pans))
 
 
 def normalise(x, y):

@@ -252,12 +252,14 @@ class Homing:
                 _drive(h["tilt"] - pos.tilt, self.TILT_TOL * 0.5, self.max_speed),
             )
             ez = h["hfov"] - pos.hfov  # + = need a wider view
-            if abs(ez) < self.FOV_TOL * 0.5:
-                self.cam.zoom(0)
-            else:
-                self.cam.zoom((-1 if ez > 0 else 1) * min(self.max_speed, 0.4 if abs(ez) > 3 else 0.15))
+            self.cam.zoom(0 if abs(ez) < self.FOV_TOL * 0.5 else drive_zoom(ez, self.max_speed))
             return False
         return True
+
+
+def drive_zoom(fov_err, max_speed):
+    """Zoom speed toward a target field of view (fov_err in degrees, + = need a wider view): fast when far, gentle near."""
+    return (-1 if fov_err > 0 else 1) * min(max_speed, 0.4 if abs(fov_err) > 3 else 0.15)
 
 
 def _drive(err, tol, max_speed=0.5):
